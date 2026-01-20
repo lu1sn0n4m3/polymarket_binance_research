@@ -103,7 +103,8 @@ class HourlyMarketSession:
     
     # Internal state
     _conn: duckdb.DuckDBPyConnection | None = field(default=None, repr=False)
-    _up_token_id: str | None = field(default=None, repr=False)
+    _primary_token_id: str | None = field(default=None, repr=False)
+    _token_is_up: bool | None = field(default=None, repr=False)  # Inferred from resolution
     
     # Cached data
     _polymarket_bbo: pd.DataFrame | None = field(default=None, repr=False)
@@ -153,9 +154,9 @@ class HourlyMarketSession:
         return self.utc_start - timedelta(hours=self.lookback_hours)
     
     @property
-    def up_token_id(self) -> str | None:
-        """Token ID for the "Up" outcome (first token alphabetically)."""
-        if self._up_token_id is None:
+    def primary_token_id(self) -> str | None:
+        """Primary token ID we're analyzing (first alphabetically, may be Up or Down)."""
+        if self._primary_token_id is None:
             tokens = get_unique_token_ids(
                 self.utc_start,
                 self.utc_end,
@@ -163,8 +164,50 @@ class HourlyMarketSession:
                 self.conn,
             )
             if tokens:
-                self._up_token_id = tokens[0]  # First (alphabetically) is Up
-        return self._up_token_id
+                self._primary_token_id = tokens[0]
+        return self._primary_token_id
+    
+    @property
+    def token_is_up(self) -> bool | None:
+        """Whether the primary token represents 'Up' outcome (inferred from resolution).
+        
+        Returns None if we can't determine (e.g., no outcome data or flat market).
+        """
+        if self._token_is_up is not None:
+            return self._token_is_up
+        
+        # Need outcome and polymarket data to infer
+        outcome = self.outcome
+        pm_bbo = self.polymarket_bbo
+        
+        if outcome is None or pm_bbo.empty:
+            return None
+        
+        # Get final Polymarket price (last mid price)
+        final_mid = (pm_bbo.iloc[-1]["bid_px"] + pm_bbo.iloc[-1]["ask_px"]) / 2
+        
+        # Infer based on resolution:
+        # - If BTC went UP and PM price → 1, token is "Up"
+        # - If BTC went UP and PM price → 0, token is "Down"
+        # - If BTC went DOWN and PM price → 1, token is "Down"
+        # - If BTC went DOWN and PM price → 0, token is "Up"
+        price_went_high = final_mid > 0.5
+        
+        if outcome.outcome == "up":
+            self._token_is_up = price_went_high
+        elif outcome.outcome == "down":
+            self._token_is_up = not price_went_high
+        else:
+            # Flat market - can't determine
+            return None
+        
+        return self._token_is_up
+    
+    # Backward compatibility alias
+    @property
+    def up_token_id(self) -> str | None:
+        """Deprecated: Use primary_token_id instead."""
+        return self.primary_token_id
     
     # -------------------------------------------------------------------------
     # Data Loading Properties (lazy)
@@ -172,39 +215,39 @@ class HourlyMarketSession:
     
     @property
     def polymarket_bbo(self) -> pd.DataFrame:
-        """Polymarket BBO data for the market hour (Up token only)."""
+        """Polymarket BBO data for the market hour (primary token)."""
         if self._polymarket_bbo is None:
             self._polymarket_bbo = load_polymarket_bbo(
                 self.utc_start,
                 self.utc_end,
                 self.asset,
-                token_id_prefix=self.up_token_id[:6] if self.up_token_id else None,
+                token_id_prefix=self.primary_token_id[:6] if self.primary_token_id else None,
                 conn=self.conn,
             )
         return self._polymarket_bbo
     
     @property
     def polymarket_trades(self) -> pd.DataFrame:
-        """Polymarket trades for the market hour (Up token only)."""
+        """Polymarket trades for the market hour (primary token)."""
         if self._polymarket_trades is None:
             self._polymarket_trades = load_polymarket_trades(
                 self.utc_start,
                 self.utc_end,
                 self.asset,
-                token_id_prefix=self.up_token_id[:6] if self.up_token_id else None,
+                token_id_prefix=self.primary_token_id[:6] if self.primary_token_id else None,
                 conn=self.conn,
             )
         return self._polymarket_trades
     
     @property
     def polymarket_book(self) -> pd.DataFrame:
-        """Polymarket L2 order book snapshots for the market hour (Up token only)."""
+        """Polymarket L2 order book snapshots for the market hour (primary token)."""
         if self._polymarket_book is None:
             self._polymarket_book = load_polymarket_book(
                 self.utc_start,
                 self.utc_end,
                 self.asset,
-                token_id_prefix=self.up_token_id[:6] if self.up_token_id else None,
+                token_id_prefix=self.primary_token_id[:6] if self.primary_token_id else None,
                 conn=self.conn,
             )
         return self._polymarket_book
@@ -265,9 +308,12 @@ class HourlyMarketSession:
     def aligned(self) -> pd.DataFrame:
         """Aligned DataFrame with Polymarket and Binance data joined on ts_recv.
         
+        **Important:** Polymarket prices are normalized to always represent the
+        "Up" probability. If the primary token was "Down", prices are flipped (1 - price).
+        
         Columns:
         - ts_recv: Receive timestamp (ms)
-        - pm_bid, pm_ask, pm_bid_sz, pm_ask_sz: Polymarket BBO
+        - pm_bid, pm_ask, pm_bid_sz, pm_ask_sz: Polymarket BBO (normalized to Up)
         - pm_mid, pm_spread, pm_microprice: Derived Polymarket fields
         - bnc_bid, bnc_ask, bnc_bid_sz, bnc_ask_sz: Binance BBO (ASOF matched)
         - bnc_mid, bnc_spread: Derived Binance fields
@@ -283,6 +329,22 @@ class HourlyMarketSession:
         
         if pm.empty:
             return pd.DataFrame()
+        
+        # Normalize to "Up" probability if we loaded the "Down" token
+        # This ensures pm_bid/ask always represent P(Up)
+        token_is_up = self.token_is_up
+        if token_is_up is False:
+            # Flip prices: Up_bid = 1 - Down_ask, Up_ask = 1 - Down_bid
+            pm_bid_new = 1.0 - pm["ask_px"]
+            pm_ask_new = 1.0 - pm["bid_px"]
+            # Sizes swap too
+            pm_bid_sz_new = pm["ask_sz"]
+            pm_ask_sz_new = pm["bid_sz"]
+            
+            pm["bid_px"] = pm_bid_new
+            pm["ask_px"] = pm_ask_new
+            pm["bid_sz"] = pm_bid_sz_new
+            pm["ask_sz"] = pm_ask_sz_new
         
         # Rename Polymarket columns
         pm = pm.rename(columns={
@@ -427,6 +489,8 @@ class HourlyMarketSession:
         """Clear all cached data to free memory."""
         self._polymarket_bbo = None
         self._polymarket_trades = None
+        self._polymarket_bbo = None
+        self._polymarket_trades = None
         self._polymarket_book = None
         self._binance_bbo = None
         self._binance_trades = None
@@ -434,7 +498,8 @@ class HourlyMarketSession:
         self._binance_lookback_trades = None
         self._aligned = None
         self._outcome = None
-        self._up_token_id = None
+        self._primary_token_id = None
+        self._token_is_up = None
     
     def __repr__(self) -> str:
         return (

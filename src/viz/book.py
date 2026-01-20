@@ -145,7 +145,7 @@ def plot_book_depth(
     )
     
     # Mid price line
-    if bid_prices and ask_prices:
+    if len(bid_prices) > 0 and len(ask_prices) > 0:
         mid = (bid_prices[0] + ask_prices[0]) / 2
         max_depth = max(max(bid_cumsum) if bid_cumsum.size > 0 else 0,
                         max(ask_cumsum) if ask_cumsum.size > 0 else 0)

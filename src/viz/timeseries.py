@@ -106,18 +106,35 @@ def plot_session(
         outcome = session.outcome
         close_dt = pd.to_datetime(outcome.close_ts, unit="ms", utc=True)
         
-        # Vertical line at close
-        fig.add_vline(
+        # Vertical line at close (use shape instead of vline to avoid Timestamp issues)
+        fig.add_shape(
+            type="line",
+            x0=close_dt,
+            x1=close_dt,
+            y0=0,
+            y1=1,
+            yref="paper",
+            line=dict(dash="dash", color="gray", width=1),
+        )
+        
+        # Add annotation separately
+        fig.add_annotation(
             x=close_dt,
-            line_dash="dash",
-            line_color="gray",
-            annotation_text=f"Close: {outcome.outcome.upper()} ({outcome.return_pct:+.2f}%)",
-            annotation_position="top right",
+            y=1,
+            yref="paper",
+            text=f"Close: {outcome.outcome.upper()} ({outcome.return_pct:+.2f}%)",
+            showarrow=False,
+            xanchor="left",
+            yanchor="top",
+            font=dict(size=10, color="gray"),
         )
     
     # Update layout
     if title is None:
-        title = f"{session.asset} {session.market_date} {session.hour_et}:00 ET"
+        token_info = ""
+        if session.token_is_up is not None:
+            token_info = " (normalized to Up)" if not session.token_is_up else ""
+        title = f"{session.asset} {session.market_date} {session.hour_et}:00 ET{token_info}"
     
     fig.update_layout(
         title=title,
