@@ -207,6 +207,7 @@ def compute_derived_fields(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     
     Args:
         df: DataFrame with bid_px, ask_px, bid_sz, ask_sz columns
+                      OR {prefix}bid, {prefix}ask, {prefix}bid_sz, {prefix}ask_sz columns
         prefix: Prefix for new column names (e.g., "pm_" or "bnc_")
         
     Returns:
@@ -214,10 +215,24 @@ def compute_derived_fields(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     """
     df = df.copy()
     
-    bid_col = f"{prefix}bid_px" if prefix else "bid_px"
-    ask_col = f"{prefix}ask_px" if prefix else "ask_px"
-    bid_sz_col = f"{prefix}bid_sz" if prefix else "bid_sz"
-    ask_sz_col = f"{prefix}ask_sz" if prefix else "ask_sz"
+    # Try both naming conventions: bid_px/ask_px or {prefix}bid/{prefix}ask
+    if prefix:
+        # Check for {prefix}bid (e.g., pm_bid) first
+        if f"{prefix}bid" in df.columns:
+            bid_col = f"{prefix}bid"
+            ask_col = f"{prefix}ask"
+            bid_sz_col = f"{prefix}bid_sz"
+            ask_sz_col = f"{prefix}ask_sz"
+        else:
+            bid_col = f"{prefix}bid_px"
+            ask_col = f"{prefix}ask_px"
+            bid_sz_col = f"{prefix}bid_sz"
+            ask_sz_col = f"{prefix}ask_sz"
+    else:
+        bid_col = "bid_px"
+        ask_col = "ask_px"
+        bid_sz_col = "bid_sz"
+        ask_sz_col = "ask_sz"
     
     # Check if columns exist
     if bid_col not in df.columns or ask_col not in df.columns:

@@ -203,13 +203,13 @@ def plot_book_depth_over_time(
         ask_prices = row.get("ask_prices", [])
         ask_sizes = row.get("ask_sizes", [])
         
-        bid_depth = sum(bid_sizes[:depth]) if bid_sizes else 0
-        ask_depth = sum(ask_sizes[:depth]) if ask_sizes else 0
+        bid_depth = sum(bid_sizes[:depth]) if len(bid_sizes) > 0 else 0
+        ask_depth = sum(ask_sizes[:depth]) if len(ask_sizes) > 0 else 0
         
         bid_depths.append(bid_depth)
         ask_depths.append(ask_depth)
         
-        if bid_prices and ask_prices:
+        if len(bid_prices) > 0 and len(ask_prices) > 0:
             spreads.append(ask_prices[0] - bid_prices[0])
         else:
             spreads.append(np.nan)

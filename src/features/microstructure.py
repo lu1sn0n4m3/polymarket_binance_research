@@ -179,8 +179,8 @@ def compute_book_depth_imbalance(
     imbalances = []
     
     for bids, asks in zip(bid_sizes, ask_sizes):
-        bid_sum = sum(bids[:depth]) if bids else 0
-        ask_sum = sum(asks[:depth]) if asks else 0
+        bid_sum = sum(bids[:depth]) if len(bids) > 0 else 0
+        ask_sum = sum(asks[:depth]) if len(asks) > 0 else 0
         total = bid_sum + ask_sum
         
         if total > 0:
