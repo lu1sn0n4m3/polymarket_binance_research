@@ -6,6 +6,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from src.config import get_config
@@ -194,9 +195,9 @@ class HourlyMarketSession:
         price_went_high = final_mid > 0.5
         
         if outcome.outcome == "up":
-            self._token_is_up = price_went_high
+            self._token_is_up = bool(price_went_high)
         elif outcome.outcome == "down":
-            self._token_is_up = not price_went_high
+            self._token_is_up = bool(not price_went_high)
         else:
             # Flat market - can't determine
             return None
@@ -484,6 +485,246 @@ class HourlyMarketSession:
         """
         start_ms = int(self.utc_start.timestamp() * 1000)
         return max(0, (ts_ms - start_ms) / 1000)
+    
+    # -------------------------------------------------------------------------
+    # Pricing Support Methods
+    # -------------------------------------------------------------------------
+    
+    def get_binance_mid_at(self, ts_ms: int) -> float | None:
+        """Get Binance mid price at a specific timestamp.
+        
+        Args:
+            ts_ms: Timestamp in milliseconds
+            
+        Returns:
+            Mid price, or None if no data
+        """
+        state = self.get_binance_at(ts_ms)
+        if state is None:
+            return None
+        return (state["bid_px"] + state["ask_px"]) / 2
+    
+    def get_open_price(self) -> float | None:
+        """Get the opening price (first Binance trade in the hour)."""
+        if self.outcome is None:
+            return None
+        return self.outcome.open_price
+    
+    def get_realized_return(self, ts_ms: int) -> float | None:
+        """Get log return from open to timestamp: log(S_t / S_0).
+        
+        Args:
+            ts_ms: Current timestamp in milliseconds
+            
+        Returns:
+            Log return, or None if data unavailable
+        """
+        open_price = self.get_open_price()
+        current_price = self.get_binance_mid_at(ts_ms)
+        
+        if open_price is None or current_price is None:
+            return None
+        
+        return np.log(current_price / open_price)
+    
+    def get_binance_mid_series(
+        self,
+        sample_ms: int = 1000,
+        include_lookback: bool = False,
+    ) -> pd.DataFrame:
+        """Get Binance mid prices resampled to a regular grid.
+        
+        Args:
+            sample_ms: Sample interval in milliseconds
+            include_lookback: If True, include lookback period
+            
+        Returns:
+            DataFrame with ts_ms and mid columns
+        """
+        if include_lookback:
+            bbo = self.binance_lookback_bbo
+            start_ms = int(self.lookback_start.timestamp() * 1000)
+        else:
+            bbo = self.binance_bbo
+            start_ms = int(self.utc_start.timestamp() * 1000)
+        
+        if bbo.empty:
+            return pd.DataFrame(columns=["ts_ms", "mid"])
+        
+        end_ms = int(self.utc_end.timestamp() * 1000)
+        
+        # Compute mid prices
+        bbo = bbo.copy()
+        bbo["mid"] = (bbo["bid_px"] + bbo["ask_px"]) / 2
+        
+        # Create regular grid
+        grid_ts = np.arange(start_ms, end_ms, sample_ms)
+        
+        # For each grid point, find latest mid price
+        bbo_sorted = bbo.sort_values("ts_recv")
+        
+        # Use searchsorted for efficiency
+        indices = np.searchsorted(bbo_sorted["ts_recv"].values, grid_ts, side="right") - 1
+        indices = np.clip(indices, 0, len(bbo_sorted) - 1)
+        
+        mids = bbo_sorted["mid"].values[indices]
+        
+        # Mask out grid points before first data
+        first_ts = bbo_sorted["ts_recv"].iloc[0]
+        mask = grid_ts >= first_ts
+        
+        result = pd.DataFrame({
+            "ts_ms": grid_ts[mask],
+            "mid": mids[mask],
+        })
+        
+        return result
+    
+    def compute_rv_since_open(
+        self,
+        ts_ms: int,
+        sample_ms: int = 1000,
+    ) -> float:
+        """Compute realized variance from market open to timestamp.
+        
+        RV = Σ (log returns)²
+        
+        Args:
+            ts_ms: End timestamp in milliseconds
+            sample_ms: Sample interval for returns
+            
+        Returns:
+            Realized variance (sum of squared log returns)
+        """
+        mid_series = self.get_binance_mid_series(sample_ms=sample_ms, include_lookback=False)
+        
+        if mid_series.empty:
+            return 0.0
+        
+        # Filter to [open, ts_ms]
+        start_ms = int(self.utc_start.timestamp() * 1000)
+        mask = (mid_series["ts_ms"] >= start_ms) & (mid_series["ts_ms"] <= ts_ms)
+        filtered = mid_series[mask]
+        
+        if len(filtered) < 2:
+            return 0.0
+        
+        # Compute log returns
+        log_prices = np.log(filtered["mid"].values)
+        log_returns = np.diff(log_prices)
+        
+        return float(np.sum(log_returns ** 2))
+    
+    def compute_rv_recent(
+        self,
+        ts_ms: int,
+        window_ms: int,
+        sample_ms: int = 1000,
+    ) -> float:
+        """Compute realized variance in a recent window.
+        
+        Args:
+            ts_ms: End timestamp in milliseconds
+            window_ms: Window size in milliseconds
+            sample_ms: Sample interval for returns
+            
+        Returns:
+            Realized variance in the window
+        """
+        mid_series = self.get_binance_mid_series(sample_ms=sample_ms, include_lookback=True)
+        
+        if mid_series.empty:
+            return 0.0
+        
+        # Filter to [ts_ms - window_ms, ts_ms]
+        window_start = ts_ms - window_ms
+        mask = (mid_series["ts_ms"] >= window_start) & (mid_series["ts_ms"] <= ts_ms)
+        filtered = mid_series[mask]
+        
+        if len(filtered) < 2:
+            return 0.0
+        
+        # Compute log returns
+        log_prices = np.log(filtered["mid"].values)
+        log_returns = np.diff(log_prices)
+        
+        return float(np.sum(log_returns ** 2))
+    
+    def get_pricing_grid(self, sample_ms: int = 1000) -> pd.DataFrame:
+        """Get a time grid for pricing with all relevant data.
+        
+        Returns DataFrame with columns:
+        - ts_ms: Timestamp
+        - tau_sec: Time to expiry in seconds
+        - elapsed_sec: Time since open in seconds
+        - bnc_mid: Binance mid price
+        - r_0_to_t: Log return from open
+        - pm_mid: Polymarket mid (if available at this time)
+        
+        Args:
+            sample_ms: Sample interval in milliseconds
+            
+        Returns:
+            DataFrame for pricing computations
+        """
+        start_ms = int(self.utc_start.timestamp() * 1000)
+        end_ms = int(self.utc_end.timestamp() * 1000)
+        
+        # Get Binance mid series
+        bnc_series = self.get_binance_mid_series(sample_ms=sample_ms, include_lookback=False)
+        
+        if bnc_series.empty:
+            return pd.DataFrame()
+        
+        df = bnc_series.rename(columns={"mid": "bnc_mid"})
+        
+        # Add time fields
+        df["tau_sec"] = (end_ms - df["ts_ms"]) / 1000
+        df["elapsed_sec"] = (df["ts_ms"] - start_ms) / 1000
+        
+        # Add log return from open
+        open_price = self.get_open_price()
+        if open_price:
+            df["r_0_to_t"] = np.log(df["bnc_mid"] / open_price)
+        else:
+            df["r_0_to_t"] = np.nan
+        
+        # Add Polymarket mid (ASOF join)
+        pm_bbo = self.polymarket_bbo
+        if not pm_bbo.empty:
+            # Normalize if needed
+            token_is_up = self.token_is_up
+            if token_is_up is False:
+                # Flip: Up_bid = 1 - Down_ask, Up_ask = 1 - Down_bid
+                pm_bid = 1.0 - pm_bbo["ask_px"]
+                pm_ask = 1.0 - pm_bbo["bid_px"]
+            else:
+                pm_bid = pm_bbo["bid_px"]
+                pm_ask = pm_bbo["ask_px"]
+            
+            pm_mid = (pm_bid + pm_ask) / 2
+            
+            pm_df = pd.DataFrame({
+                "ts_ms": pm_bbo["ts_recv"],
+                "pm_bid": pm_bid.values,
+                "pm_ask": pm_ask.values,
+                "pm_mid": pm_mid.values,
+            }).sort_values("ts_ms")
+            
+            # ASOF join
+            df = df.sort_values("ts_ms")
+            df = pd.merge_asof(
+                df,
+                pm_df,
+                on="ts_ms",
+                direction="backward",
+            )
+        else:
+            df["pm_bid"] = np.nan
+            df["pm_ask"] = np.nan
+            df["pm_mid"] = np.nan
+        
+        return df.reset_index(drop=True)
     
     def clear_cache(self) -> None:
         """Clear all cached data to free memory."""

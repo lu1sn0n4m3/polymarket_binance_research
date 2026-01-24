@@ -23,7 +23,7 @@ def _build_s3_path(
     return (
         f"s3://{config.s3.bucket}/{config.s3.prefix}/"
         f"venue={venue}/stream_id={stream_id}/event_type={event_type}/"
-        f"date={date_str}/hour={hour}/data.parquet"
+        f"date={date_str}/hour={hour:02d}/data.parquet"
     )
 
 
