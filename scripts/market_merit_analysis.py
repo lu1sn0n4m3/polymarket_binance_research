@@ -31,7 +31,7 @@ from scipy.optimize import minimize
 
 # Date range (UTC)
 START_DATE = datetime(2026, 1, 18, 13, tzinfo=timezone.utc)
-END_DATE = datetime(2026, 1, 22, 17, tzinfo=timezone.utc)
+END_DATE = datetime(2026, 1, 25, 15, tzinfo=timezone.utc)
 
 # Fixed τ values (time remaining in seconds) - ONE sample per hour per τ
 TAU_VALUES = [3000, 1800, 900, 300, 120]  # 50min, 30min, 15min, 5min, 2min
