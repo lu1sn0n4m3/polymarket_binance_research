@@ -1,0 +1,363 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{mathtools}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\title{A Practical Estimator and Pricer for BTC-Linked Hourly Digital Contracts\\
+\large Grid Construction, Seasonal Volatility, Live EWMA \& Shock, and Low-Dimensional Probabilistic Calibration}
+\author{Luis Safar}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note specifies an implementable end-to-end procedure to produce a live ``fair probability'' for BTC-linked hourly binary (digital) contracts using only Binance best bid/ask mid prices. The design goal is not to build a perfect structural model of BTC, but to build a \emph{stable, low-dimensional} probabilistic pricer that (i) reacts quickly to genuine price jumps, (ii) is not dominated by microstructure noise, and (iii) outputs the objects needed for market making: a probability level and short-horizon risk proxies. The estimator layer combines a fixed 100\,ms mid-price grid, a simple seasonal volatility curve estimated by a robust MAD statistic, and a live volatility ``heat'' estimator via EWMA on normalized returns plus a fast shock score. The pricer layer maps the resulting state into the terminal-event probability using a location--scale return model with an arbitrary CDF, specialized to a Student-$t$ distribution to capture fat tails. Calibration is done by Bernoulli log-likelihood (log loss) with an $L_2$ penalty, yielding a straightforward optimization with only one to three parameters.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Data and Grid Construction}
+
+\subsection{Mid price from best bid/ask}
+Let $B(t)$ and $A(t)$ be the Binance best bid and best ask at event time $t$ (timestamped by the data source). Define the mid price
+\[
+m(t) \;=\; \frac{B(t)+A(t)}{2}.
+\]
+Throughout, pricing is performed in log space. Define the log mid
+\[
+\ell(t) \;=\; \ln m(t).
+\]
+
+\subsection{A fixed 100\,ms grid via previous-tick sampling}
+High-frequency feeds arrive at irregular times (here roughly $\sim$88 updates/sec). For live robustness and reproducibility, we map the irregular stream to a fixed time grid. Fix the grid spacing
+\[
+\Delta = 0.1 \text{ seconds} \quad (100\text{ ms}),
+\]
+and define grid times $t_k = t_0 + k\Delta$.
+
+Define the grid mid by previous-tick (forward-fill) sampling:
+\[
+S_k \;=\; m(t_k^-) \;=\; m\!\left(\max\{t \le t_k : m(t)\ \text{observed}\}\right),
+\quad
+\ell_k = \ln S_k.
+\]
+This rule is live-safe (no interpolation that implicitly uses future information) and ensures that backtests match live behavior.
+
+The 100\,ms log return series is
+\[
+r_k \;=\; \ell_k - \ell_{k-1} \;=\; \ln\!\left(\frac{S_k}{S_{k-1}}\right).
+\]
+All volatility and shock statistics below are computed on this \emph{same} 100\,ms grid, which keeps implementation simple and minimizes unit confusion.
+
+\subsection{Hourly contract labeling}
+For each hourly market, fix:
+\begin{itemize}[leftmargin=2em]
+\item a settlement time $T$ (in UTC), and
+\item a boundary (strike) $K$.
+\end{itemize}
+The binary outcome is
+\[
+Y \;=\; \mathbf{1}\{S_T > K\}.
+\]
+In calibration, any observation time $t_k < T$ within that hourly market shares the same label $Y$.
+
+\section{Seasonal Volatility on the 24h Clock}
+
+\subsection{Why a seasonal component}
+BTC volatility has a strong intraday pattern (session effects). A seasonal baseline reduces the burden on the live estimator and makes ``shock'' thresholds comparable across time-of-day. The seasonal curve should reflect \emph{typical} conditions at a given clock time and should be robust to rare bursts.
+
+\subsection{Time-of-day buckets}
+Partition the 24-hour day into fixed buckets, e.g.\ 5-minute buckets. Let $b(t_k)\in\{1,\dots,B\}$ be the bucket index of grid time $t_k$ based on its time-of-day.
+
+Within bucket $b$, collect all 100\,ms returns across the entire dataset whose timestamps fall in bucket $b$:
+\[
+\mathcal{R}_b \;=\; \{r_k : b(t_k)=b\}.
+\]
+
+\subsection{MAD as a robust volatility estimate}
+For a set of returns $\mathcal{R}_b$, define the median absolute deviation (MAD) as
+\[
+\mathrm{MAD}(\mathcal{R}_b)
+\;=\;
+\mathrm{median}\!\left(\left|r - \mathrm{median}(\mathcal{R}_b)\right|: r\in\mathcal{R}_b\right).
+\]
+The MAD is robust: a small number of outliers (jumps) cannot arbitrarily inflate it, unlike the sample standard deviation.
+
+If returns were Gaussian with standard deviation $\sigma$, then
+\[
+\mathbb{E}[\mathrm{MAD}] \approx 0.6745\,\sigma,
+\]
+so the standard deviation can be estimated by multiplying MAD by
+\[
+1/0.6745 \approx 1.4826.
+\]
+Thus define the seasonal (time-of-day) volatility for 100\,ms returns in bucket $b$ as
+\[
+\sigma_{\text{tod}}(b)
+\;=\;
+1.4826 \cdot \mathrm{MAD}(\mathcal{R}_b).
+\]
+This $\sigma_{\text{tod}}(b)$ is in \emph{the same units as} $r_k$: it is the typical standard deviation of a \emph{single 100\,ms log return} at that time-of-day.
+
+\paragraph{Smoothing (optional).}
+Because only two weeks of data are used, the raw bucket curve may be noisy. A simple circular moving-average across adjacent buckets can smooth the curve without adding model complexity.
+
+\subsection{Intentional look-ahead simplification}
+For implementation simplicity, the seasonal curve is computed once using the full dataset (a mild look-ahead). This makes the baseline cleaner and reduces engineering complexity. The trade-off is optimistic backtest calibration because the baseline uses information from the full sample. In live trading the seasonal curve can be recomputed periodically (e.g.\ daily) if desired, but for a first pass the full-sample seasonal curve is often acceptable.
+
+\section{Live Volatility and Shock on the 100\,ms Grid}
+
+\subsection{Normalized returns}
+At time $t_k$ with bucket $b_k=b(t_k)$, define the normalized (dimensionless) return
+\[
+u_k \;=\; \frac{r_k}{\sigma_{\text{tod}}(b_k)}.
+\]
+Interpretation: under ``typical'' conditions at that time-of-day, $u_k$ should have a scale near 1. This normalization makes the live estimator comparable across sessions.
+
+\subsection{EWMA of normalized variance}
+Define the EWMA variance recursion
+\[
+v_k \;=\; (1-\alpha)v_{k-1} + \alpha u_k^2,
+\qquad v_0=1.
+\]
+Define the live \emph{relative} volatility multiplier
+\[
+\sigma_{\text{rel},k} \;=\; \sqrt{v_k}.
+\]
+Then the live standard deviation of a 100\,ms return is
+\[
+\sigma_{\Delta,k} \;=\; \sigma_{\text{tod}}(b_k)\,\sigma_{\text{rel},k}.
+\]
+This is a simple but effective decomposition: time-of-day sets the baseline, and the EWMA estimates how hot the current regime is relative to that baseline.
+
+\subsection{A simple shock statistic}
+A separate shock statistic should fire quickly on sudden moves without forcing the EWMA to become too reactive. Using the same normalized returns, define
+\[
+z_k \;=\; \max_{j=k-M+1,\dots,k} |u_j|,
+\]
+where $M$ is the number of 100\,ms steps in the shock lookback window. For example, $M=3$ corresponds to 300\,ms and $M=5$ corresponds to 500\,ms.
+
+\paragraph{No extra $\sqrt{\Delta}$ factor.}
+There is no additional $\sqrt{\Delta}$ term in $z_k$ because $u_k$ is already dimensionless and properly scaled: $\sigma_{\text{tod}}$ matches the 100\,ms return interval used for $r_k$.
+
+\subsection{Practical parameter choice for $\alpha$ (EWMA speed)}
+It is convenient to choose $\alpha$ via a half-life $H$ in seconds: the time over which the influence of a squared return decays by half in the EWMA. With grid step $\Delta=0.1$\,s,
+\[
+\alpha \;=\; 1 - \exp\!\left(-\frac{\ln 2}{H}\Delta\right).
+\]
+Examples:
+\begin{itemize}[leftmargin=2em]
+\item $H=10$\,s $\Rightarrow \alpha \approx 0.00693$,
+\item $H=20$\,s $\Rightarrow \alpha \approx 0.00347$,
+\item $H=30$\,s $\Rightarrow \alpha \approx 0.00231$.
+\end{itemize}
+For a first implementation, $H\in[10,30]$ seconds is a sensible range: fast enough to adapt within tens of seconds, but not so fast that $v_k$ becomes a proxy for the shock detector.
+
+\paragraph{Stability clamps (recommended).}
+In practice, winsorizing extreme $u_k^2$ before the EWMA update (or clamping $v_k$ to a reasonable range) prevents one-off data glitches from contaminating the live scale for too long. The shock detector should be the primary mechanism for reacting to extreme moves.
+
+\section{A Low-Dimensional Probabilistic Pricer}
+
+\subsection{Setup: an abstract CDF $F$}
+Let $t$ be the current time with $t<T$. Define $\tau = T-t$ (seconds). Let the current mid be $S=S_t$ and strike be $K$.
+
+Model the remaining log return to settlement as a location--scale random variable:
+\[
+\ln\!\left(\frac{S_T}{S}\right) \;=\; \sigma_{\text{eff}}(t)\,\sqrt{\tau}\,X,
+\]
+where $X$ is a standardized random variable with CDF $F(\cdot)$, i.e.\ $F(x)=\mathbb{P}(X\le x)$, and $\sigma_{\text{eff}}(t)>0$ is an effective volatility scale (defined below).
+
+The contract pays YES iff $S_T > K$. Convert this event to log space:
+\[
+S_T > K
+\quad \Longleftrightarrow \quad
+\ln(S_T) - \ln(S) > \ln(K) - \ln(S)
+\quad \Longleftrightarrow \quad
+\ln\!\left(\frac{S_T}{S}\right) > \ln\!\left(\frac{K}{S}\right).
+\]
+Substitute the model:
+\[
+\sigma_{\text{eff}}(t)\sqrt{\tau}\,X > \ln\!\left(\frac{K}{S}\right)
+\quad \Longleftrightarrow \quad
+X > x(t),
+\]
+where the standardized threshold is
+\[
+x(t) \;=\; \frac{\ln(K/S)}{\sigma_{\text{eff}}(t)\sqrt{\tau}}.
+\]
+Therefore, the fair probability is
+\[
+p(t)
+\;=\;
+\mathbb{P}(S_T>K \mid \mathcal{F}_t)
+\;=\;
+\mathbb{P}(X > x(t))
+\;=\;
+1 - F(x(t)).
+\]
+This is the key identity: \emph{the probability is $1-F(\cdot)$ evaluated at the correct standardized threshold.} It is easy to accidentally swap $S/K$ vs $K/S$ or to accidentally compute $F(\cdot)$ instead of $1-F(\cdot)$; the derivation above fixes the sign and the tail direction.
+
+\subsection{Specialization: Student-$t$}
+To allow fat tails with minimal parameterization, take $X \sim t_\nu$ (Student-$t$ with $\nu$ degrees of freedom), with CDF $F_{t_\nu}$ and PDF $f_{t_\nu}$.
+
+Then
+\[
+p(t) \;=\; 1 - F_{t_\nu}\!\left(x(t)\right),
+\qquad
+x(t) \;=\; \frac{\ln(K/S)}{\sigma_{\text{eff}}(t)\sqrt{\tau}}.
+\]
+As $\nu\to\infty$, $t_\nu$ converges to the standard Normal, recovering the Gaussian model as a limiting case.
+
+\subsection{Effective volatility with shock inflation}
+Define the base live 100\,ms volatility as in the estimator layer:
+\[
+\sigma_{\Delta,k} \;=\; \sigma_{\text{tod}}(b_k)\,\sigma_{\text{rel},k}.
+\]
+Convert to ``per $\sqrt{\text{second}}$'' units by dividing by $\sqrt{\Delta}$:
+\[
+\sigma_{\text{base}}(t_k) \;=\; \frac{\sigma_{\Delta,k}}{\sqrt{\Delta}}.
+\]
+Since $\Delta=0.1$\,s is fixed, this conversion is constant.
+
+To incorporate shocks, inflate the effective volatility with a simple hinge function of the shock score $z_k$:
+\[
+\kappa(z_k) \;=\; 1 + \gamma\,\max(0, z_k - c),
+\qquad \gamma \ge 0,\ c>0,
+\]
+and define
+\[
+\sigma_{\text{eff}}(t_k) \;=\; \sigma_{\text{base}}(t_k)\,\kappa(z_k).
+\]
+The hinge has two intuitive parameters: $c$ is the shock threshold (in ``sigmas'' of normalized 100\,ms returns), and $\gamma$ controls how aggressively volatility is inflated once shocks begin.
+
+\section{Calibration by Bernoulli Log-Likelihood}
+
+\subsection{Calibration dataset construction}
+For each hourly market (fixed $K$ and $T$), we may observe the state at many grid times $t_k$. However, adjacent grid points are highly dependent and share the same label $Y$. Using every 100\,ms point would overstate the effective sample size and encourage overconfident probabilities.
+
+A practical approach is to sample a \emph{small set of decision times} per hour:
+\begin{itemize}[leftmargin=2em]
+\item Uniform sampling: e.g.\ one sample every 2\,s or 5\,s throughout the hour.
+\item Time-to-expiry sampling: coarser early (e.g.\ every 5\,s when $\tau>10$\,min) and finer late (e.g.\ every 1\,s when $\tau\le 10$\,min), because the probability surface steepens near expiry.
+\end{itemize}
+With 2\,s sampling, each hour contributes $\sim$1800 samples; with 5\,s sampling, $\sim$720 samples. Both are workable, but for only two weeks of data the 5\,s rate is often sufficient and less prone to ``fake'' sample-size inflation. Time-block validation (walk-forward) is recommended to avoid regime leakage.
+
+Each sample $i$ consists of:
+\[
+\left(S_i,\, \tau_i,\, \sigma_{\text{eff}}(t_i),\, K_i,\, T_i\right)
+\quad \text{and label} \quad
+y_i = \mathbf{1}\{S_{T_i} > K_i\}.
+\]
+Given parameters $\theta$, the model produces $p_i(\theta)$ via $p_i=1-F_{t_\nu}(x_i)$ with $x_i = \ln(K_i/S_i)/(\sigma_{\text{eff}}(t_i)\sqrt{\tau_i})$.
+
+\subsection{Bernoulli log-likelihood (log loss)}
+Given predicted probabilities $p_i(\theta)\in(0,1)$ and labels $y_i\in\{0,1\}$, the negative log-likelihood is
+\[
+\mathcal{L}(\theta)
+\;=\;
+-\sum_{i=1}^{N}
+\left[
+y_i\ln p_i(\theta) + (1-y_i)\ln\bigl(1-p_i(\theta)\bigr)
+\right].
+\]
+This is the correct objective for probabilistic calibration. It penalizes confident mistakes heavily, which is desirable for a market-making pricer that must remain robust in the tails.
+
+\subsection{$L_2$ regularization for a 3-parameter optimization}
+If optimizing a small parameter vector (e.g.\ $\theta=(\nu,\gamma,c)$ or $\theta=(\nu,\gamma,c_0)$ with constraints), add an $L_2$ penalty:
+\[
+\mathcal{L}_{\text{reg}}(\theta)
+\;=\;
+\mathcal{L}(\theta) + \lambda\|\theta-\theta_0\|_2^2,
+\]
+where $\lambda\ge 0$ controls shrinkage and $\theta_0$ is an optional prior center (often $0$ or a reasonable baseline). In practice one may parameterize $\nu$ and other constrained parameters in an unconstrained space (e.g.\ optimize $\log(\nu-2)$ to enforce $\nu>2$).
+
+\subsection{A simplified 1-parameter calibration}
+For a first run with limited data, fix $\nu$ (e.g.\ $\nu=\infty$ for Normal or a conservative finite value such as $\nu=6$) and fix the shock threshold $c$ (e.g.\ $c\in[3,5]$). Then optimize only $\gamma\ge 0$:
+\[
+\min_{\gamma\ge 0}\;
+-\sum_{i=1}^{N}
+\left[
+y_i\ln p_i(\gamma) + (1-y_i)\ln\bigl(1-p_i(\gamma)\bigr)
+\right]
++ \lambda \gamma^2.
+\]
+This yields an interpretable calibration: how much should shocks inflate uncertainty to match realized terminal outcomes?
+
+\section{Outputs: Fair Probability and Sensitivities}
+
+\subsection{Fair probability}
+At live time $t_k$, compute:
+\begin{enumerate}[leftmargin=2em]
+\item $S=S_k$ and $\tau = T - t_k$,
+\item estimator state $\sigma_{\text{eff}}(t_k)=\sigma_{\text{base}}(t_k)\kappa(z_k)$,
+\item standardized threshold $x(t_k)=\ln(K/S)/(\sigma_{\text{eff}}(t_k)\sqrt{\tau})$,
+\item probability
+\[
+p^\*(t_k) = 1 - F_{t_\nu}\!\bigl(x(t_k)\bigr).
+\]
+\end{enumerate}
+
+\subsection{Local sensitivity $dp/dS$}
+Let $f$ denote the PDF corresponding to $F$ (for Student-$t$, $f=f_{t_\nu}$). With
+\[
+p(t)=1-F(x(t)),
+\qquad
+x(t)=\frac{\ln(K/S)}{\sigma_{\text{eff}}(t)\sqrt{\tau}},
+\]
+treating $\sigma_{\text{eff}}(t)$ and $\tau$ as fixed with respect to an instantaneous change in $S$, we have
+\[
+\frac{dp}{dS}
+=
+-\frac{dF}{dx}\frac{dx}{dS}
+=
+-f(x)\cdot\left(\frac{-1}{S\,\sigma_{\text{eff}}(t)\sqrt{\tau}}\right)
+=
+\frac{f(x)}{S\,\sigma_{\text{eff}}(t)\sqrt{\tau}}.
+\]
+This derivative is positive, as it must be: increasing $S$ increases the probability that $S_T>K$.
+
+A convenient ``gamma proxy'' in log space is
+\[
+\frac{dp}{d\ln S}
+=
+S\frac{dp}{dS}
+=
+\frac{f(x)}{\sigma_{\text{eff}}(t)\sqrt{\tau}},
+\]
+which isolates sensitivity to multiplicative price changes.
+
+\subsection{Finite-horizon one-sided probability shocks}
+For market making, the most actionable sensitivity is often a finite difference over a short horizon $h$ (e.g.\ 200\,ms) rather than an infinitesimal derivative. Let $q_+(h)$ and $q_-(h)$ be representative adverse log-moves over horizon $h$, for example conditional quantiles (estimated empirically) of the log return over horizon $h$:
+\[
+q_+(h) > 0,\qquad q_-(h) > 0.
+\]
+Define the one-sided probability shocks
+\[
+\Delta p_+(h) = p^\*\!\left(S e^{q_+(h)}\right) - p^\*(S),
+\qquad
+\Delta p_-(h) = p^\*\!\left(S e^{-q_-(h)}\right) - p^\*(S).
+\]
+These objects directly quantify how much the fair probability can move against a resting quote over the relevant short horizon and naturally drive asymmetric bid/ask quoting policies.
+
+\section{Summary}
+This estimator--pricer stack is intentionally low-dimensional. The high-frequency layer constructs a stable 100\,ms mid-price grid, decomposes volatility into a seasonal baseline (MAD-based, robust) and a live relative multiplier (EWMA on normalized returns), and adds a fast shock score to capture sudden instability. The pricer maps the resulting state into a terminal-event probability using a location--scale model with an explicit CDF, specialized to Student-$t$ to capture fat tails with minimal parameterization. Calibration is performed by Bernoulli log-likelihood with optional $L_2$ regularization, enabling practical optimization even with only two weeks of data. The output is a live probability $p^\*$ together with both local and finite-horizon sensitivities suitable for market-making risk control and quoting policy.
+\vspace{0.75em}
+
+\noindent\textbf{Disclaimer.} This document is for research and discussion only and does not constitute financial, legal, or investment advice. Trading and market making involve significant risk, including rapid losses.
+
+\end{document}

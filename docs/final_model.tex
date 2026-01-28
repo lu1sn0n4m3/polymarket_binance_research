@@ -1,0 +1,87 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\title{Final BTC-Linked Hourly Digital Pricer: Clean Specification}
+\author{Luis Safar}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Probability Mapping}
+Let $S$ denote the current BTC mid price, $K$ the strike, and $\tau$ the time-to-expiry in \emph{seconds}. The model prices the YES probability of the event $\{S_T>K\}$ as
+\begin{equation}
+p \;=\; 1 - \Phi\!\left(\frac{\ln(K/S)}{\sigma_{\text{eff}}\,\sqrt{\tau}}\right),
+\end{equation}
+where $\Phi(\cdot)$ is the standard Normal CDF and $\sigma_{\text{eff}}$ is an effective volatility in log-return units per $\sqrt{\text{second}}$.
+
+\section{Effective Volatility}
+The effective volatility is defined as a geometric blend of a seasonal baseline and a live realized-volatility estimate:
+\begin{equation}
+\sigma_{\text{eff}}
+\;=\;
+a(\tau)\;\sigma_{\text{tod}}\;
+\left(\frac{\sigma_{\text{rv}}}{\sigma_{\text{tod}}}\right)^{\beta},
+\end{equation}
+where $\sigma_{\text{tod}}$ is the time-of-day seasonal volatility baseline, $\sigma_{\text{rv}}$ is a live EWMA realized volatility estimate, and $\beta\in[0,1]$ controls regime sensitivity.
+
+\subsection{Time-to-expiry scaling}
+Let $\tau_{\min}=\tau/60$ be time-to-expiry in minutes. The fitted $\tau$-dependent scale is
+\begin{equation}
+a(\tau) \;=\; a_0 + a_1\sqrt{\tau_{\min}},
+\qquad
+\tau_{\min}=\frac{\tau}{60}.
+\end{equation}
+
+\section{EWMA Realized Volatility}
+Let $r_k$ be the log return over the interval $\Delta t_k$ (in seconds) ending at time index $k$. The EWMA variance recursion with half-life $H=300$ seconds is
+\begin{align}
+v_k &= (1-\alpha_k)\,v_{k-1} + \alpha_k\left(\frac{r_k}{\sqrt{\Delta t_k}}\right)^2,\\[4pt]
+\sigma_{\text{rv},k} &= \sqrt{v_k},
+\end{align}
+with time-varying update rate
+\begin{equation}
+\alpha_k
+\;=\;
+1-\exp\!\left(-\frac{\ln 2}{H}\,\Delta t_k\right),
+\qquad
+H=300\text{ s}.
+\end{equation}
+Thus $\sigma_{\text{rv}}$ is a volatility in log-return units per $\sqrt{\text{second}}$.
+
+\section{Fitted Parameters}
+The fitted parameters are:
+\begin{equation}
+a_0 = 0.32,
+\qquad
+a_1 = 0.026,
+\qquad
+\beta = 0.81.
+\end{equation}
+
+\section{Simplified Equivalent Form}
+Substituting the fitted parameters, the effective volatility can be written as
+\begin{equation}
+\sigma_{\text{eff}}
+=
+\bigl(0.32 + 0.026\sqrt{\tau_{\min}}\bigr)\;
+\sigma_{\text{tod}}^{\,1-\beta}\;
+\sigma_{\text{rv}}^{\,\beta},
+\qquad
+\beta=0.81,
+\end{equation}
+i.e.\ a geometric blend of $\sigma_{\text{tod}}$ (weight $1-\beta=0.19$) and $\sigma_{\text{rv}}$ (weight $\beta=0.81$), with an additional $\tau$-dependent scaling.
+
+\end{document}
