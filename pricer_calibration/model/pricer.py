@@ -1,57 +1,12 @@
-"""Pricer: p = 1 - F(x) with shock inflation.
+"""Pricer: p = 1 - Φ(x) with Normal distribution.
 
-Supports Student-t and Normal distributions via an abstract CDF interface.
+Core pricing formula (log-normal diffusion with convexity correction):
+    x = (ln(K/S) + ½σ²τ) / (σ_eff * √τ)
+    p = 1 - Φ(x)
 """
 
-from typing import Protocol
-
 import numpy as np
-from scipy import stats
-
-
-# ---------------------------------------------------------------------------
-# Abstract CDF interface
-# ---------------------------------------------------------------------------
-
-class DistributionCDF(Protocol):
-    """Protocol for a symmetric location-scale CDF."""
-
-    def cdf(self, x: np.ndarray | float) -> np.ndarray | float: ...
-    def pdf(self, x: np.ndarray | float) -> np.ndarray | float: ...
-
-
-class StudentT:
-    """Student-t CDF wrapper."""
-
-    def __init__(self, nu: float):
-        self.nu = nu
-        self._dist = stats.t(df=nu)
-
-    def cdf(self, x):
-        return self._dist.cdf(x)
-
-    def pdf(self, x):
-        return self._dist.pdf(x)
-
-
-class Normal:
-    """Standard Normal CDF wrapper."""
-
-    def __init__(self):
-        self._dist = stats.norm
-
-    def cdf(self, x):
-        return self._dist.cdf(x)
-
-    def pdf(self, x):
-        return self._dist.pdf(x)
-
-
-def get_distribution(dist: str = "student_t", nu: float = 6.0) -> DistributionCDF:
-    """Factory for distribution objects."""
-    if dist == "normal":
-        return Normal()
-    return StudentT(nu)
+from scipy.stats import norm
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +30,6 @@ def price_probability(
     z: np.ndarray | float,
     gamma: float = 0.0,
     c: float = 3.5,
-    nu: float = 6.0,
-    dist: str = "student_t",
     a: float = 1.0,
     b: float = 0.0,
 ) -> np.ndarray | float:
@@ -90,16 +43,12 @@ def price_probability(
         z: Shock statistic.
         gamma: Shock inflation slope.
         c: Shock threshold.
-        nu: Student-t degrees of freedom.
-        dist: "student_t" or "normal".
         a: Global scale multiplier for sigma_base.
         b: Variance floor (per √sec). Effective σ = sqrt((a*σ_base)² + b²).
 
     Returns:
         p in (0, 1), clipped to [1e-9, 1-1e-9].
     """
-    distribution = get_distribution(dist, nu)
-
     # Scale sigma_base by a, then apply shock inflation
     sigma_scaled = a * sigma_base * kappa(z, gamma, c)
 
@@ -110,7 +59,7 @@ def price_probability(
         sigma_eff = sigma_scaled
 
     sqrt_tau = np.sqrt(np.maximum(tau, 1e-6))
-    x = np.log(K / S) / (sigma_eff * sqrt_tau)
+    x = (np.log(K / S) + 0.5 * sigma_eff**2 * tau) / (sigma_eff * sqrt_tau)
 
-    p = 1.0 - distribution.cdf(x)
+    p = 1.0 - norm.cdf(x)
     return np.clip(p, 1e-9, 1.0 - 1e-9)

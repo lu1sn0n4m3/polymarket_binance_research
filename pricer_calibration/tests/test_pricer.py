@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from pricer_calibration.model.pricer import price_probability, kappa, StudentT, Normal
+from pricer_calibration.model.pricer import price_probability, kappa
 from pricer_calibration.model.sensitivities import dp_dS, dp_dlogS, delta_p_one_sided
 
 
@@ -59,16 +59,9 @@ class TestPricer:
         assert p <= 1.0 - 1e-9
 
     def test_correct_tail_direction(self):
-        """p = 1 - F(x), so S > K → x < 0 → p > 0.5."""
+        """p = 1 - Φ(x), so S > K → x < 0 → p > 0.5."""
         p = price_probability(S=101.0, K=100.0, tau=3600.0, sigma_base=0.001, z=0.0)
         assert p > 0.5
-
-    def test_normal_matches_studentt_large_nu(self):
-        """Student-t with large ν should approximate Normal."""
-        kwargs = dict(S=100.5, K=100.0, tau=1800.0, sigma_base=0.001, z=1.0, gamma=0.0, c=3.5)
-        p_normal = price_probability(**kwargs, dist="normal")
-        p_studentt = price_probability(**kwargs, dist="student_t", nu=1000.0)
-        assert abs(p_normal - p_studentt) < 0.01
 
     def test_vectorized(self):
         """Should work with numpy arrays."""

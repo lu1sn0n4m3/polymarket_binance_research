@@ -2,10 +2,10 @@
 # See docs/estimation.tex and docs/task.md for details.
 
 # Data range
-start_date: "2026-01-18"
-start_hour: 13
-end_date: "2026-01-27"
-end_hour: 20
+start_date: "2026-01-19"
+start_hour: 0
+end_date: "2026-01-30"
+end_hour: 12
 asset: "BTC"
 
 # Grid
@@ -24,16 +24,11 @@ ewma_u_sq_cap: 100  # winsorize u_k² at this value
 shock_M: 5  # rolling max window in grid steps (500ms)
 shock_c: 3.5  # hinge threshold
 
-# Pricer
-dist: "student_t"  # "student_t" or "normal"
-nu: 6  # Student-t degrees of freedom (ignored if dist=normal)
-
 # Calibration
 gamma_init: 0.0  # initial γ
 lambda_l2: 0.0  # no L2 penalty
-sample_interval_sec: 300  # calibration dataset sampling interval (5 min)
+sample_interval_sec: 60  # calibration dataset sampling interval (1 min)
 fix_c: false  # optimize shock threshold c
-fix_nu: false  # optimize ν (degrees of freedom)
 
 # Output
 output_dir: "pricer_calibration/output"

@@ -1,56 +1,55 @@
 # Binary Option Pricer Calibration
 
-This module calibrates a model for pricing binary options of the form "Will BTC be above $K at time T?". The model estimates the probability P(S_T > K) using volatility-based pricing with calibrated parameters.
+Calibrates a model for pricing binary options of the form "Will BTC be above $K at time T?". Estimates P(S_T > K) using volatility-based pricing with a two-stage calibrated parameter set.
 
 ## Model
 
-The core pricing formula is:
+Two-stage pipeline: a volatility model (Stage 1) fed through a probit calibration layer (Stage 2).
 
-$$p = 1 - \Phi\left(\frac{\ln(K/S)}{\sigma_{\text{eff}} \cdot \sqrt{\tau}}\right)$$
+### Stage 1: Effective Volatility
 
-where $\Phi$ is the standard normal CDF, $S$ is current price, $K$ is strike, and $\tau$ is time to expiry in seconds.
+$$\sigma_{\text{eff}} = a(\tau) \cdot \sigma_{\text{tod}}^{1-\beta} \cdot \sigma_{\text{rv}}^{\beta}$$
 
-### Effective Volatility
+where $a(\tau) = a_0 + a_1 \cdot \sqrt{\tau_{\min}}$ and $\tau_{\min} = \tau / 60$.
 
-The key innovation is the effective volatility model:
+Raw z-score from log-normal diffusion with convexity correction:
 
-$$\sigma_{\text{eff}} = a(\tau) \cdot \sigma_{\text{tod}} \cdot \left(\frac{\sigma_{\text{rv}}}{\sigma_{\text{tod}}}\right)^\beta$$
-
-This can be rewritten as:
-
-$$\sigma_{\text{eff}} = a(\tau) \cdot \sigma_{\text{tod}}^{1-\beta} \cdot \sigma_{\text{rv}}^\beta$$
+$$z = \frac{\ln(K/S) + \tfrac{1}{2}\sigma_{\text{eff}}^2 \tau}{\sigma_{\text{eff}} \sqrt{\tau}}$$
 
 **Components:**
 
-1. **τ-dependent scaling**: $a(\tau) = a_0 + a_1 \cdot \sqrt{\tau_{\min}}$
-   - Accounts for the fact that short-horizon volatility behaves differently than long-horizon
-   - $\tau_{\min} = \tau / 60$ (time to expiry in minutes)
+- **$\sigma_{\text{tod}}$** (seasonal vol): MAD estimator on tick-time returns, 5-minute buckets (288/day), captures intraday seasonality.
+- **$\sigma_{\text{rv}}$** (realized vol): EWMA of sum(dx^2)/sum(dt) with 5-minute half-life, captures current volatility regime.
+- **$\beta$** (regime blend): Equal weighting ($\beta \approx 0.50$) of seasonal and realized vol.
 
-2. **Time-of-day volatility** ($\sigma_{\text{tod}}$):
-   - Captures intraday seasonality (e.g., higher vol during US market hours)
-   - Computed using MAD estimator on tick-time returns
-   - Stored per 5-minute bucket (288 buckets per day)
+### Stage 2: Probit Calibration
 
-3. **Realized volatility** ($\sigma_{\text{rv}}$):
-   - EWMA of squared tick-time returns with 5-minute half-life
-   - Captures current volatility regime (high/low vol periods)
-   - More responsive than flat lookback windows
+$$z' = b_0 + b_1 \cdot \text{score} + b_2 \cdot \ln\tau + b_3 \cdot \ln\sigma_{\text{rel}} + b_4 \cdot (\ln\sigma_{\text{rel}})^2$$
 
-4. **Regime blend** ($\beta$):
-   - Controls how much to weight current regime vs seasonal baseline
-   - $\beta \approx 0.83$ means ~83% weight on $\sigma_{\text{rv}}$, ~17% on $\sigma_{\text{tod}}$
+$$p = \Phi(z')$$
 
-### Calibrated Parameters
+where $\text{score} = -z$ and $\sigma_{\text{rel}} = \sigma_{\text{rv}} / \sigma_{\text{tod}}$.
 
-Current fitted values (on ~2,666 samples):
+This corrects for residual miscalibration in the raw model across time horizons and volatility regimes.
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| $a_0$ | 0.318 | Base scale |
-| $a_1$ | 0.026 | τ-dependence |
-| $\beta$ | 0.831 | Regime blend |
+### Fitted Parameters
 
-**Performance**: Log loss = 0.505 (+27% improvement vs constant rate baseline)
+8 total parameters (3 + 5), trained on 15,840 samples (264 hourly candles, Jan 19-30 2026).
+
+| Parameter | Value | Role |
+|-----------|-------|------|
+| $a_0$ | 1.604 | Base vol scale |
+| $a_1$ | 0.071 | $\sqrt{\tau}$ dependence |
+| $\beta$ | 0.502 | Regime blend (equal weight) |
+| $b_0$ | +0.028 | Probit intercept |
+| $b_1$ | +1.003 | Score scaling |
+| $b_2$ | -0.015 | $\ln\tau$ adjustment |
+| $b_3$ | +0.026 | $\ln\sigma_{\text{rel}}$ adjustment |
+| $b_4$ | -0.019 | $(\ln\sigma_{\text{rel}})^2$ curvature |
+
+**Performance:** Log loss = 0.4706, +31.9% improvement vs constant rate baseline.
+
+Diagnostics use **cluster-robust standard errors** (blocking by hourly candle) since all 60 samples within each hour share the same outcome. No statistically significant bias remains in any tau-bucket or volatility quartile.
 
 ## Directory Structure
 
@@ -58,157 +57,106 @@ Current fitted values (on ~2,666 samples):
 pricer_calibration/
 ├── config.yaml            # Pipeline configuration
 ├── config.py              # Config loader
-├── README.md              # This file
 ├── data/
 │   ├── ingest.py          # Load Binance BBO data from S3
 │   ├── grid.py            # Build 100ms calendar-time grid
 │   └── labels.py          # Generate binary labels (did S_T > K?)
 ├── features/
-│   ├── seasonal_vol.py    # Compute σ_tod (time-of-day vol)
-│   └── ewma_shock.py      # EWMA features (legacy)
+│   ├── seasonal_vol.py    # Compute sigma_tod (time-of-day vol)
+│   └── ewma_shock.py      # EWMA + shock features for grid pipeline
 ├── model/
 │   ├── pricer.py          # Core pricing function
 │   └── sensitivities.py   # dp/dS and related derivatives
 ├── run/
-│   ├── build_dataset.py   # Build calibration dataset (used internally)
-│   └── run_calibration.py # ONE-CLICK CALIBRATION SCRIPT
+│   ├── build_dataset.py   # Build calibration dataset
+│   └── run_calibration.py # One-click calibration script
 ├── tests/                 # Unit tests
 └── output/                # Cached data and results
-    ├── params_final.json            # Fitted parameters
-    ├── calibration_diagnostics.png  # Diagnostic plots
-    └── calibration_dataset.parquet  # Calibration data
+    ├── params_final.json
+    ├── calibration_diagnostics.png
+    ├── calibration_conditional.png
+    ├── pure_model_diagnostics.png
+    └── calibration_dataset.parquet
 ```
 
 ## Quick Start
 
 ### 1. Configure
 
-Edit `config.yaml` to set your data range:
+Edit `config.yaml`:
 
 ```yaml
-start_date: "2026-01-18"
-end_date: "2026-01-27"
+start_date: "2026-01-19"
+end_date: "2026-01-30"
+end_hour: 12
 asset: "BTC"
 ```
 
-### 2. Run Calibration (One Command)
+### 2. Run Calibration
 
 ```bash
-python -m pricer_calibration.run.run_calibration
-```
-
-This single command will:
-- Load/build calibration dataset (with S3 caching)
-- Compute σ_tod (seasonal) and σ_rv (EWMA) features
-- Fit model parameters (a0, a1, β) via maximum likelihood
-- Generate diagnostic plots
-- Save results to `output/`
-
-### Options
-
-```bash
-# Use existing dataset (default - fast recalibration)
+# Use existing dataset (fast recalibration)
 python -m pricer_calibration.run.run_calibration
 
-# Force rebuild dataset from scratch
+# Force rebuild dataset from scratch (after config change or new data)
 python -m pricer_calibration.run.run_calibration --rebuild
-
-# Use custom config file
-python -m pricer_calibration.run.run_calibration --config path/to/config.yaml
 ```
 
-## Recalibration Workflow
+Output:
+- `output/params_final.json` -- fitted parameters
+- `output/calibration_diagnostics.png` -- main diagnostic plots (2x3)
+- `output/calibration_conditional.png` -- conditional reliability (4x4 grid: tau x vol)
+- `output/pure_model_diagnostics.png` -- diagnostics without probit layer
 
-To recalibrate with new data:
+### Diagnostic Plots
 
-1. Update `config.yaml` with new date range
-2. Run: `python -m pricer_calibration.run.run_calibration --rebuild`
+**Main diagnostics** (2x3):
+1. Calibration curve (equal-mass bins)
+2. Log loss by time-to-expiry
+3. Log loss by |z'| (calibrated score)
+4. Log loss by sigma_rel (volatility regime)
+5. Prediction distribution by outcome
+6. Mean residual vs z'
 
-To recalibrate on existing data (e.g., after code changes):
-
-1. Run: `python -m pricer_calibration.run.run_calibration`
-
-The cache system automatically invalidates when config changes.
-
-## Volatility Estimation Details
-
-### Time-of-Day Volatility (σ_tod)
-
-Computed using **tick-time MAD** (Median Absolute Deviation):
-
-1. Extract consecutive mid-price changes from raw BBO
-2. Compute log returns: $r_i = \ln(S_i / S_{i-1})$
-3. Normalize to per-√sec: $r_{\text{norm}} = r_i / \sqrt{\Delta t_i}$
-4. Bucket by time-of-day (5-min buckets)
-5. For each bucket: $\sigma_{\text{tod}} = 1.4826 \times \text{MAD}(r_{\text{norm}})$
-
-The 1.4826 factor makes MAD consistent with Gaussian standard deviation.
-
-### Realized Volatility (σ_rv)
-
-Computed using **EWMA on tick-time returns**:
-
-$$v_k = (1 - \alpha_k) \cdot v_{k-1} + \alpha_k \cdot r_k^2$$
-
-$$\sigma_{\text{rv},k} = \sqrt{v_k}$$
-
-where $\alpha_k = 1 - \exp\left(-\frac{\ln 2 \cdot \Delta t_k}{H}\right)$ and $H = 300$ seconds (5-min half-life).
-
-This gives more weight to recent returns, making $\sigma_{\text{rv}}$ responsive to regime changes.
-
-## Calibration Objective
-
-The model is fit by minimizing **Bernoulli log-loss**:
-
-$$\mathcal{L} = -\frac{1}{N} \sum_{i=1}^N \left[ y_i \ln(p_i) + (1-y_i) \ln(1-p_i) \right]$$
-
-where $y_i \in \{0, 1\}$ is the realized outcome and $p_i$ is the predicted probability.
-
-## Diagnostic Plots
-
-The calibration script generates `calibration_diagnostics.png` with:
-
-1. **Calibration plot**: Predicted vs actual (binned)
-2. **Performance by τ**: Log loss by time-to-expiry buckets
-3. **Performance by |x|**: Log loss by distance from strike
-4. **Performance by σ_rel**: Log loss by volatility regime
-5. **Prediction distribution**: Histograms by outcome
-6. **Residual analysis**: Mean residual vs x
-
-### The "Dead Zone"
-
-When $|x| = \left|\frac{\ln(K/S)}{\sigma\sqrt{\tau}}\right| < 1$, the outcome is nearly random (close to 50/50). This is the "dead zone" where the model has limited predictive power. Approximately 72% of samples fall in this zone.
-
-The model adds most value when $|x| > 1$ (price is meaningfully far from strike), achieving log loss of ~0.16 in this region.
+**Conditional reliability** (4x4):
+- Rows: tau buckets [0-5, 5-15, 15-30, 30-60] minutes
+- Columns: sigma_rel quartiles [Q1, Q2, Q3, Q4]
 
 ## Using the Model
 
 ```python
-from pricer_calibration.model import price_probability
-
-# Load fitted parameters
 import json
+import numpy as np
+from scipy.stats import norm
+
+# Load parameters
 with open("pricer_calibration/output/params_final.json") as f:
     params = json.load(f)
 
-# Price a binary option
-p = price_probability(
-    S=100000,           # Current BTC price
-    K=101000,           # Strike price
-    tau=3600,           # 1 hour to expiry (seconds)
-    sigma_base=0.0001,  # Your σ_eff estimate (per √sec)
-    z=0,                # Shock statistic (set to 0)
-    gamma=0,            # Shock parameter (set to 0)
-    dist="normal",      # Use Normal distribution
-)
-print(f"Probability: {p:.2%}")
+a0, a1, beta = params["a0"], params["a1"], params["beta"]
+probit = params["probit_layer"]
+
+# Given: S (current price), K (strike), tau (seconds to expiry),
+#        sigma_tod (seasonal vol), sigma_rv (realized vol)
+sigma_rel = sigma_rv / sigma_tod
+tau_min = tau / 60.0
+a_tau = a0 + a1 * np.sqrt(tau_min)
+sigma_eff = a_tau * sigma_tod * sigma_rel**beta
+
+# Stage 1: raw z-score
+sqrt_tau = np.sqrt(tau)
+z = (np.log(K / S) + 0.5 * sigma_eff**2 * tau) / (sigma_eff * sqrt_tau)
+
+# Stage 2: probit calibration
+score = -z
+log_tau = np.log(tau)
+log_sr = np.log(sigma_rel)
+zp = (probit["b0"] + probit["b1"] * score + probit["b2"] * log_tau
+      + probit["b3"] * log_sr + probit["b4"] * log_sr**2)
+p = norm.cdf(zp)
 ```
 
-Note: You'll need to compute `sigma_base` (i.e., $\sigma_{\text{eff}}$) using your own $\sigma_{\text{tod}}$ and $\sigma_{\text{rv}}$ estimates with the fitted $a_0, a_1, \beta$ parameters.
-
 ## Tests
-
-Run unit tests:
 
 ```bash
 pytest pricer_calibration/tests/

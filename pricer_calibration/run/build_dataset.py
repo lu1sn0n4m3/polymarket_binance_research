@@ -5,7 +5,6 @@ Usage:
 """
 
 import argparse
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,109 +15,60 @@ from pricer_calibration.config import PipelineConfig, load_config
 from pricer_calibration.data.ingest import load_binance_bbo_clean
 from pricer_calibration.data.grid import build_grid
 from pricer_calibration.data.labels import build_hourly_labels
-from pricer_calibration.features.seasonal_vol import compute_seasonal_vol, compute_seasonal_vol_ticktime
+from pricer_calibration.features.seasonal_vol import compute_seasonal_vol_ticktime
 from pricer_calibration.features.ewma_shock import compute_ewma_shock
-
-
-def _cache_key(cfg: PipelineConfig) -> dict:
-    """Generate a cache key from config for validation."""
-    return {
-        "start_date": cfg.start_date.isoformat(),
-        "end_date": cfg.end_date.isoformat(),
-        "start_hour": cfg.start_hour,
-        "end_hour": cfg.end_hour,
-        "asset": cfg.asset,
-        "delta_ms": cfg.delta_ms,
-    }
-
-
-def _load_cache_metadata(output_dir: Path) -> dict | None:
-    """Load cache metadata if it exists."""
-    meta_path = output_dir / "cache_metadata.json"
-    if meta_path.exists():
-        with open(meta_path) as f:
-            return json.load(f)
-    return None
-
-
-def _save_cache_metadata(output_dir: Path, cfg: PipelineConfig):
-    """Save cache metadata."""
-    meta_path = output_dir / "cache_metadata.json"
-    with open(meta_path, "w") as f:
-        json.dump(_cache_key(cfg), f, indent=2)
-
-
-def _cache_valid(cfg: PipelineConfig, output_dir: Path) -> bool:
-    """Check if existing cache matches current config."""
-    meta = _load_cache_metadata(output_dir)
-    if meta is None:
-        return False
-    return meta == _cache_key(cfg)
 
 
 def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
     """Run the full pipeline: ingest → grid → features → calibration rows.
 
-    Caches BBO data and grid locally to avoid repeated S3 fetches.
-    Cache is invalidated if config (date range, asset, delta_ms) changes.
+    Uses incremental daily caching for BBO data (only fetches missing days).
     """
     from datetime import time as dt_time
     start_dt = datetime.combine(cfg.start_date, dt_time(cfg.start_hour), tzinfo=timezone.utc)
     end_dt = datetime.combine(cfg.end_date, dt_time(cfg.end_hour), tzinfo=timezone.utc)
 
-    # Step 1: Load and clean BBO (with local cache to avoid S3 re-fetches)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: Load BBO with incremental daily caching
+    print(f"Loading Binance BBO {cfg.start_date} to {cfg.end_date} ({cfg.asset}) ...")
+    bbo = load_binance_bbo_clean(start_dt, end_dt, asset=cfg.asset)
+    print(f"  Total: {len(bbo):,} BBO rows")
+
+    if bbo.empty:
+        print("No BBO data loaded. Exiting.")
+        return pd.DataFrame()
+
+    # Save combined BBO for downstream use (e.g., σ_rv computation)
     bbo_cache = output_dir / "bbo_cache.parquet"
+    bbo.to_parquet(bbo_cache, index=False)
+    print(f"  Saved combined BBO to {bbo_cache}")
+
+    # Step 2: Build 100ms grid
     grid_cache = output_dir / "grid_cache.parquet"
-
-    # Check if cache is valid for current config
-    cache_valid = _cache_valid(cfg, output_dir)
-    if not cache_valid and (bbo_cache.exists() or grid_cache.exists()):
-        print("Cache config mismatch - invalidating cache...")
-        if bbo_cache.exists():
-            bbo_cache.unlink()
-        if grid_cache.exists():
-            grid_cache.unlink()
-
-    # Always load BBO (needed for tick-time seasonal vol)
-    if bbo_cache.exists():
-        print(f"Loading cached BBO from {bbo_cache} ...")
-        bbo = pd.read_parquet(bbo_cache)
-    else:
-        print(f"Loading Binance BBO {cfg.start_date} to {cfg.end_date} ({cfg.asset}) ...")
-        print("  (This may take a while for first fetch from S3)")
-        bbo = load_binance_bbo_clean(start_dt, end_dt, asset=cfg.asset)
-        bbo.to_parquet(bbo_cache, index=False)
-        print(f"  Cached to {bbo_cache}")
-    print(f"  {len(bbo):,} BBO rows")
-
-    # Step 2: Build 100ms grid (cached)
-    if grid_cache.exists():
-        print(f"Loading cached grid from {grid_cache} ...")
-        grid = pd.read_parquet(grid_cache)
-        print(f"  {len(grid):,} grid rows (cached)")
-    else:
-        print("Building 100ms grid ...")
-        grid = build_grid(bbo, delta_ms=cfg.delta_ms)
-        grid.to_parquet(grid_cache, index=False)
-        print(f"  Cached to {grid_cache}")
-        # Save cache metadata after successful cache creation
-        _save_cache_metadata(output_dir, cfg)
+    print("Building 100ms grid ...")
+    grid = build_grid(bbo, delta_ms=cfg.delta_ms)
+    grid.to_parquet(grid_cache, index=False)
     print(f"  {len(grid):,} grid rows")
 
     # Step 3: Seasonal volatility using TICK-TIME method
-    # This is critical: the 100ms grid only captures ~8% of mid changes,
-    # so we compute seasonal vol from actual mid changes in raw BBO.
     print("Computing seasonal volatility (MAD on tick-time returns) ...")
     seasonal = compute_seasonal_vol_ticktime(
         bbo,
         bucket_minutes=cfg.tod_bucket_minutes,
         smoothing_window=cfg.tod_smoothing_window,
         floor=cfg.sigma_tod_floor,
-        target_interval_sec=1.0,  # σ_tod in per-√sec units
+        target_interval_sec=1.0,
     )
     print(f"  {seasonal.n_buckets} TOD buckets, median σ_tod = {np.median(seasonal.sigma_tod):.2e}")
+
+    # Save seasonal vol
+    seasonal_df = pd.DataFrame({
+        "bucket": np.arange(seasonal.n_buckets),
+        "sigma_tod": seasonal.sigma_tod,
+    })
+    seasonal_df.to_parquet(output_dir / "seasonal_vol.parquet", index=False)
 
     # Free BBO memory after seasonal vol is computed
     del bbo
@@ -135,15 +85,9 @@ def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
     )
     print(f"  Done. σ_rel median = {np.median(features['sigma_rel'].values):.3f}")
 
-    # Step 5: Contract labels (cached)
-    labels_cache = output_dir / "labels_cache.parquet"
-    if labels_cache.exists():
-        print(f"Loading cached labels from {labels_cache} ...")
-        labels = pd.read_parquet(labels_cache)
-    else:
-        print("Building hourly labels from trades ...")
-        labels = build_hourly_labels(start_dt, end_dt, asset=cfg.asset)
-        labels.to_parquet(labels_cache, index=False)
+    # Step 5: Contract labels
+    print("Building hourly labels from trades ...")
+    labels = build_hourly_labels(start_dt, end_dt, asset=cfg.asset)
     print(f"  {len(labels)} market hours labeled")
 
     if labels.empty:
@@ -175,36 +119,24 @@ def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
             tau = (hour_end_ms - row["t"]) / 1000.0  # seconds to expiry
             if tau <= 0:
                 continue
-            rows.append(
-                {
-                    "market_id": market_id,
-                    "t": row["t"],
-                    "S": row["S"],
-                    "tau": tau,
-                    "K": K,
-                    "sigma_base": row["sigma_base"],
-                    "z": row["z"],
-                    "y": Y,
-                }
-            )
+            rows.append({
+                "market_id": market_id,
+                "t": row["t"],
+                "S": row["S"],
+                "tau": tau,
+                "K": K,
+                "sigma_base": row["sigma_base"],
+                "z": row["z"],
+                "y": Y,
+            })
 
     dataset = pd.DataFrame(rows)
     print(f"  {len(dataset):,} calibration rows")
 
     # Save
-    output_dir = Path(cfg.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     dataset_path = output_dir / "calibration_dataset.parquet"
     dataset.to_parquet(dataset_path, index=False)
     print(f"  Saved to {dataset_path}")
-
-    # Also save seasonal vol and labels
-    seasonal_df = pd.DataFrame(
-        {"bucket": np.arange(seasonal.n_buckets), "sigma_tod": seasonal.sigma_tod}
-    )
-    seasonal_df.to_parquet(output_dir / "seasonal_vol.parquet", index=False)
-    labels.to_parquet(output_dir / "labels.parquet", index=False)
 
     return dataset
 

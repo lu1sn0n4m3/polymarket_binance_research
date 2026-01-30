@@ -1,15 +1,13 @@
-"""Seasonal (time-of-day) volatility estimation via MAD.
+"""Seasonal (time-of-day) volatility estimation.
 
-σ_tod(b) = 1.4826 * MAD(r_k for k in bucket b)
+σ_tod(b) = median across days of σ_bucket_day(b)
 
-where MAD = median(|r - median(r)|) and the 1.4826 factor makes it
-consistent with Gaussian standard deviation.
+where σ_bucket_day = sqrt(sum(dx_i^2) / sum(dt_i)) for ticks in that bucket.
 
-Two modes:
-1. Grid-based (sub-interval): Computes on calendar-time grid returns.
-   Works when grid captures most price changes.
-2. Tick-time: Computes on returns between consecutive mid changes in raw BBO.
-   Required when grid is too coarse and misses most changes.
+This uses the "sum-of-squares / sum-of-time" realized variance estimator,
+which is robust to microstructure noise and irregular tick arrivals.
+We do NOT normalize individual returns by sqrt(dt) - that can blow up when
+dt is tiny and injects quote-intensity artifacts.
 
 The curve is computed once on the full dataset (intentional look-ahead).
 """
@@ -25,13 +23,13 @@ import pandas as pd
 class SeasonalVolCurve:
     """Stores σ_tod per TOD bucket and provides lookup.
 
-    σ_tod values are in per-√(sub_interval) units, i.e., the MAD-scaled
-    stdev of log returns over sub_interval_sec seconds.
+    σ_tod values are in per-√sec units, computed via realized variance:
+    σ = sqrt(sum(dx^2) / sum(dt)) where dx = log returns, dt = time deltas.
     """
 
     bucket_minutes: int
-    sigma_tod: np.ndarray  # shape (n_buckets,)
-    sub_interval_sec: float = 1.0  # timescale of sigma_tod (default 1s)
+    sigma_tod: np.ndarray  # shape (n_buckets,), per-√sec units
+    sub_interval_sec: float = 1.0  # kept for compatibility
 
     @property
     def n_buckets(self) -> int:
@@ -145,28 +143,33 @@ def compute_seasonal_vol_ticktime(
     smoothing_window: int = 0,
     floor: float = 1e-10,
     target_interval_sec: float = 1.0,
+    winsorize_quantile: float = 0.01,
 ) -> SeasonalVolCurve:
-    """Compute seasonal volatility from raw BBO using tick-time returns.
+    """Compute seasonal volatility from raw BBO using realized variance.
 
-    This is the preferred method when the calendar-time grid misses most
-    price changes (e.g., when grid only captures 8% of mid changes).
+    Uses "sum-of-squares / sum-of-time" estimator:
+        var_per_sec = sum(dx_i^2) / sum(dt_i)
+        sigma = sqrt(var_per_sec)
 
-    Instead of using fixed calendar intervals, we:
-    1. Find consecutive mid changes (where mid[i] != mid[i-1])
-    2. Compute log returns between consecutive changes
-    3. Scale returns by sqrt(dt) to normalize to per-√sec units
-    4. Bucket by time-of-day and compute MAD
+    This is robust to irregular tick arrivals and doesn't blow up when dt is tiny.
+    We do NOT normalize individual returns by sqrt(dt).
+
+    For each TOD bucket, we:
+    1. Group ticks by (day, bucket)
+    2. For each day's bucket: sigma_day = sqrt(sum(dx^2) / sum(dt))
+    3. Aggregate across days: sigma_tod = median(sigma_day)
 
     Args:
         bbo: DataFrame with columns [ts_event, mid] where ts_event is epoch ms.
         bucket_minutes: TOD bucket width in minutes.
         smoothing_window: Circular moving average window (0 = no smoothing).
         floor: Minimum σ_tod value.
-        target_interval_sec: Target interval for σ_tod units (default 1s).
-            The output σ_tod will be in per-√(target_interval) units.
+        target_interval_sec: Unused, kept for API compatibility.
+        winsorize_quantile: Winsorize squared returns at this quantile to reduce
+            outlier influence. Set to 0 to disable.
 
     Returns:
-        SeasonalVolCurve with σ_tod per bucket in per-√(target_interval) units.
+        SeasonalVolCurve with σ_tod per bucket in per-√sec units.
     """
     n_buckets = 24 * 60 // bucket_minutes
 
@@ -175,10 +178,9 @@ def compute_seasonal_vol_ticktime(
 
     # Find where mid actually changed
     changed = np.zeros(len(mid), dtype=bool)
-    changed[0] = True  # Include first point
+    changed[0] = True
     changed[1:] = mid[1:] != mid[:-1]
 
-    # Extract only the changed points
     ts_changed = ts[changed]
     mid_changed = mid[changed]
 
@@ -186,48 +188,69 @@ def compute_seasonal_vol_ticktime(
         return SeasonalVolCurve(
             bucket_minutes=bucket_minutes,
             sigma_tod=np.full(n_buckets, floor),
-            sub_interval_sec=target_interval_sec,
+            sub_interval_sec=1.0,
         )
 
-    # Compute tick-time returns
+    # Compute tick-time returns (NOT normalized by sqrt(dt))
     log_mid = np.log(mid_changed)
-    r_tick = np.diff(log_mid)  # log return between consecutive changes
-    dt_ms = np.diff(ts_changed)  # time delta in ms
+    dx = np.diff(log_mid)  # log return between consecutive changes
+    dt_ms = np.diff(ts_changed)
     dt_sec = dt_ms / 1000.0
+    ts_tick = ts_changed[1:]
 
-    # Normalize returns to per-√sec: r_normalized = r / sqrt(dt)
-    # This gives us a "per-sqrt-second" return that's comparable across different dt
-    # Filter out very small dt (< 1ms) to avoid numerical issues
-    valid = dt_sec > 0.001
-    r_tick = r_tick[valid]
+    # Filter out zero/tiny dt (duplicate timestamps)
+    dt_floor = 0.0001  # 0.1ms floor just to avoid division issues
+    valid = dt_sec > dt_floor
+    dx = dx[valid]
     dt_sec = dt_sec[valid]
-    ts_tick = ts_changed[1:][valid]  # timestamp of each return
+    ts_tick = ts_tick[valid]
 
-    r_per_sqrt_sec = r_tick / np.sqrt(dt_sec)
-
-    # Compute bucket index for each tick-time return
+    # Extract day and bucket for each tick
+    # Day: integer days since epoch
+    day_idx = ts_tick // (86400 * 1000)
+    # Bucket: TOD bucket index
     total_seconds = (ts_tick // 1000) % 86400
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     bucket_idx = (hours * 60 + minutes) // bucket_minutes
 
+    # Squared returns
+    dx_sq = dx ** 2
+
+    # Optional winsorization of squared returns (robust to outliers)
+    if winsorize_quantile > 0:
+        cap = np.quantile(dx_sq, 1 - winsorize_quantile)
+        dx_sq = np.minimum(dx_sq, cap)
+
+    # For each bucket, compute sigma for each day, then take median across days
     sigma_tod = np.full(n_buckets, floor)
 
+    unique_days = np.unique(day_idx)
+
     for b in range(n_buckets):
-        mask = bucket_idx == b
-        if mask.sum() < 10:
+        bucket_mask = bucket_idx == b
+
+        if bucket_mask.sum() < 10:
             continue
-        rb = r_per_sqrt_sec[mask]
 
-        # MAD estimator: σ = 1.4826 * median(|r - median(r)|)
-        med = np.median(rb)
-        mad = np.median(np.abs(rb - med))
-        sigma_mad = 1.4826 * mad
+        # Compute sigma for each day in this bucket
+        day_sigmas = []
+        for d in unique_days:
+            day_bucket_mask = bucket_mask & (day_idx == d)
+            if day_bucket_mask.sum() < 2:
+                continue
 
-        # Convert from per-√sec to per-√(target_interval)
-        # σ(target) = σ(1sec) * √(target_interval)
-        sigma_target = sigma_mad * np.sqrt(target_interval_sec)
-        sigma_tod[b] = max(sigma_target, floor)
+            sum_dx_sq = np.sum(dx_sq[day_bucket_mask])
+            sum_dt = np.sum(dt_sec[day_bucket_mask])
+
+            if sum_dt > 0:
+                var_per_sec = sum_dx_sq / sum_dt
+                sigma_day = np.sqrt(var_per_sec)
+                day_sigmas.append(sigma_day)
+
+        if len(day_sigmas) >= 1:
+            # Median across days (robust aggregation)
+            sigma_tod[b] = max(np.median(day_sigmas), floor)
 
     # Optional smoothing (circular moving average)
     if smoothing_window > 0 and smoothing_window < n_buckets:
@@ -240,5 +263,5 @@ def compute_seasonal_vol_ticktime(
     return SeasonalVolCurve(
         bucket_minutes=bucket_minutes,
         sigma_tod=sigma_tod,
-        sub_interval_sec=target_interval_sec,
+        sub_interval_sec=1.0,  # per-√sec units
     )

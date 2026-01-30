@@ -34,16 +34,11 @@ class PipelineConfig:
     shock_M: int = 5
     shock_c: float = 3.5
 
-    # Pricer
-    dist: str = "student_t"
-    nu: float = 6.0
-
     # Calibration
     gamma_init: float = 0.0
     lambda_l2: float = 0.01
     sample_interval_sec: float = 5.0
     fix_c: bool = True
-    fix_nu: bool = True
 
     # Output
     output_dir: str = "pricer_calibration/output"
