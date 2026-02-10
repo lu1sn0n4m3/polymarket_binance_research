@@ -26,7 +26,7 @@ from src.data import load_session
 
 # Date range (UTC)
 START_DATE = datetime(2026, 1, 18, 13, tzinfo=timezone.utc)
-END_DATE = datetime(2026, 1, 23, 19, tzinfo=timezone.utc)
+END_DATE = datetime(2026, 2, 10, 17, tzinfo=timezone.utc)
 
 # Minutes to sample
 SAMPLE_MINUTES = [5, 15, 25, 35, 45, 55]
