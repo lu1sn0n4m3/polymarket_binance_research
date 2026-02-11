@@ -48,7 +48,12 @@ class DataConfig:
     
     # Default lookback for volatility estimation (hours)
     default_lookback_hours: int = 3
-    
+
+    # Cache configuration for resampled BBO data
+    cache_dir: Path = field(default_factory=lambda: Path("data/resampled_bbo"))
+    cache_enabled: bool = True
+    cache_max_size_gb: float = 10.0
+
     def stream_id_for_asset(self, asset: str, venue: str) -> str:
         """Get stream_id for an asset and venue."""
         asset = asset.upper()
