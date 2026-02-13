@@ -18,8 +18,8 @@ class PipelineConfig:
     end_hour: int = 23
     asset: str = "BTC"
 
-    # Grid
-    delta_ms: int = 100
+    # Grid interval (matches src.data.easy_api)
+    interval: str = "500ms"
 
     # TOD seasonal vol
     tod_bucket_minutes: int = 5
@@ -42,6 +42,13 @@ class PipelineConfig:
 
     # Output
     output_dir: str = "pricer_calibration/output"
+
+    _INTERVAL_MS = {"500ms": 500, "1s": 1000, "5s": 5000}
+
+    @property
+    def delta_ms(self) -> int:
+        """Grid step in milliseconds, derived from interval string."""
+        return self._INTERVAL_MS[self.interval]
 
     @property
     def delta_sec(self) -> float:
@@ -71,5 +78,11 @@ def load_config(path: str | Path | None = None) -> PipelineConfig:
 
     start_hour = raw.pop("start_hour", 0)
     end_hour = raw.pop("end_hour", 23)
+
+    # Migrate old delta_ms config to interval string
+    if "delta_ms" in raw:
+        raw.pop("delta_ms")
+        if "interval" not in raw:
+            raw["interval"] = "500ms"
 
     return PipelineConfig(start_date=start, end_date=end, start_hour=start_hour, end_hour=end_hour, **raw)

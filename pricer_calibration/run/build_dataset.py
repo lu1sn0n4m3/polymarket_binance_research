@@ -1,4 +1,4 @@
-"""Build calibration dataset: raw BBO → grid → features → sampled rows with labels.
+"""Build calibration dataset: easy API → grid → features → sampled rows with labels.
 
 Usage:
     python -m pricer_calibration.run.build_dataset [--config path/to/config.yaml]
@@ -12,18 +12,14 @@ import numpy as np
 import pandas as pd
 
 from pricer_calibration.config import PipelineConfig, load_config
-from pricer_calibration.data.ingest import load_binance_bbo_clean
-from pricer_calibration.data.grid import build_grid
 from pricer_calibration.data.labels import build_hourly_labels
 from pricer_calibration.features.seasonal_vol import compute_seasonal_vol_ticktime
 from pricer_calibration.features.ewma_shock import compute_ewma_shock
+from src.data import load_binance
 
 
 def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
-    """Run the full pipeline: ingest → grid → features → calibration rows.
-
-    Uses incremental daily caching for BBO data (only fetches missing days).
-    """
+    """Run the full pipeline: load_binance → features → calibration rows."""
     from datetime import time as dt_time
     start_dt = datetime.combine(cfg.start_date, dt_time(cfg.start_hour), tzinfo=timezone.utc)
     end_dt = datetime.combine(cfg.end_date, dt_time(cfg.end_hour), tzinfo=timezone.utc)
@@ -31,26 +27,40 @@ def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Load BBO with incremental daily caching
-    print(f"Loading Binance BBO {cfg.start_date} to {cfg.end_date} ({cfg.asset}) ...")
-    bbo = load_binance_bbo_clean(start_dt, end_dt, asset=cfg.asset)
+    # Step 1: Load resampled BBO via easy API (auto-cached in data/resampled_data/)
+    print(f"Loading Binance BBO {cfg.start_date} to {cfg.end_date} ({cfg.asset}, {cfg.interval}) ...")
+    bbo = load_binance(
+        start=start_dt,
+        end=end_dt,
+        asset=cfg.asset,
+        interval=cfg.interval,
+    )
     print(f"  Total: {len(bbo):,} BBO rows")
 
     if bbo.empty:
         print("No BBO data loaded. Exiting.")
         return pd.DataFrame()
 
-    # Save combined BBO for downstream use (e.g., σ_rv computation)
+    # Rename easy API columns to pipeline convention
+    bbo = bbo.rename(columns={"ts_recv": "ts_event", "mid_px": "mid"})
+
+    # Save BBO for downstream use (run_calibration.py reads bbo_cache.parquet)
     bbo_cache = output_dir / "bbo_cache.parquet"
     bbo.to_parquet(bbo_cache, index=False)
     print(f"  Saved combined BBO to {bbo_cache}")
 
-    # Step 2: Build 100ms grid
-    grid_cache = output_dir / "grid_cache.parquet"
-    print("Building 100ms grid ...")
-    grid = build_grid(bbo, delta_ms=cfg.delta_ms)
-    grid.to_parquet(grid_cache, index=False)
-    print(f"  {len(grid):,} grid rows")
+    # Step 2: Build grid — easy API already returns uniform-interval data
+    grid = pd.DataFrame({
+        "t": bbo["ts_event"].values,
+        "S": bbo["mid"].values,
+    })
+    grid["logS"] = np.log(grid["S"].values)
+    log_vals = grid["logS"].values
+    r = np.empty(len(log_vals))
+    r[0] = 0.0
+    r[1:] = np.diff(log_vals)
+    grid["r"] = r
+    print(f"  {len(grid):,} grid rows ({cfg.interval} interval)")
 
     # Step 3: Seasonal volatility using TICK-TIME method
     print("Computing seasonal volatility (MAD on tick-time returns) ...")
@@ -61,7 +71,7 @@ def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
         floor=cfg.sigma_tod_floor,
         target_interval_sec=1.0,
     )
-    print(f"  {seasonal.n_buckets} TOD buckets, median σ_tod = {np.median(seasonal.sigma_tod):.2e}")
+    print(f"  {seasonal.n_buckets} TOD buckets, median sigma_tod = {np.median(seasonal.sigma_tod):.2e}")
 
     # Save seasonal vol
     seasonal_df = pd.DataFrame({
@@ -83,9 +93,9 @@ def build_dataset(cfg: PipelineConfig) -> pd.DataFrame:
         u_sq_cap=cfg.ewma_u_sq_cap,
         shock_M=cfg.shock_M,
     )
-    print(f"  Done. σ_rel median = {np.median(features['sigma_rel'].values):.3f}")
+    print(f"  Done. sigma_rel median = {np.median(features['sigma_rel'].values):.3f}")
 
-    # Step 5: Contract labels
+    # Step 5: Contract labels from Binance trades
     print("Building hourly labels from trades ...")
     labels = build_hourly_labels(start_dt, end_dt, asset=cfg.asset)
     print(f"  {len(labels)} market hours labeled")

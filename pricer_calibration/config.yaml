@@ -8,8 +8,8 @@ end_date: "2026-01-30"
 end_hour: 12
 asset: "BTC"
 
-# Grid
-delta_ms: 100  # 100ms grid spacing
+# Grid interval (must match src.data.easy_api supported intervals)
+interval: "500ms"  # "500ms", "1s", or "5s"
 
 # Time-of-day seasonal volatility
 tod_bucket_minutes: 5  # 288 buckets per day
@@ -21,7 +21,7 @@ ewma_half_life_seconds: 20  # half-life H for α = 1 - exp(-ln2 * Δ/H)
 ewma_u_sq_cap: 100  # winsorize u_k² at this value
 
 # Shock
-shock_M: 5  # rolling max window in grid steps (500ms)
+shock_M: 5  # rolling max window in grid steps (5 × 500ms = 2.5s at 500ms interval)
 shock_c: 3.5  # hinge threshold
 
 # Calibration
