@@ -114,21 +114,48 @@ def _fetch_and_cache_day(
     day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
     if day_start.tzinfo is None:
         day_start = day_start.replace(tzinfo=timezone.utc)
-    day_end = day_start + timedelta(days=1)
 
-    # Load trades with retry
-    trades = None
-    for attempt in range(max_retries):
-        try:
-            trades = load_binance_trades(day_start, day_end, asset=asset)
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
-            else:
-                raise
+    # Load hour-by-hour to avoid OOM on heavy trade days
+    rows = []
+    for hour in range(24):
+        hour_start = day_start + timedelta(hours=hour)
+        hour_end = hour_start + timedelta(hours=1)
+        hour_start_ms = int(hour_start.timestamp() * 1000)
+        hour_end_ms = int(hour_end.timestamp() * 1000)
 
-    labels = _extract_hourly_labels(trades, day_start)
+        for attempt in range(max_retries):
+            try:
+                trades = load_binance_trades(hour_start, hour_end, asset=asset)
+                break
+            except Exception as e:
+                if "404" in str(e) or "Not Found" in str(e):
+                    trades = pd.DataFrame(columns=["ts_event", "price"])
+                    break
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    trades = pd.DataFrame(columns=["ts_event", "price"])
+                    break
+
+        if not trades.empty:
+            trades = trades[["ts_event", "price"]].sort_values("ts_event")
+            mask = (trades["ts_event"] >= hour_start_ms) & (trades["ts_event"] < hour_end_ms)
+            hour_trades = trades[mask]
+            if len(hour_trades) >= 2:
+                K = float(hour_trades.iloc[0]["price"])
+                S_T = float(hour_trades.iloc[-1]["price"])
+                rows.append({
+                    "hour_start_ms": hour_start_ms,
+                    "hour_end_ms": hour_end_ms,
+                    "K": K,
+                    "S_T": S_T,
+                    "Y": 1 if S_T > K else 0,
+                })
+            del trades
+
+    labels = pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["hour_start_ms", "hour_end_ms", "K", "S_T", "Y"]
+    )
 
     # Save to cache
     out_dir = _cache_dir_for(asset, cache_dir)
@@ -139,37 +166,6 @@ def _fetch_and_cache_day(
 
     # Update metadata
     _update_metadata(date, asset, cache_dir, len(labels), path.stat().st_size)
-
-
-def _extract_hourly_labels(trades: pd.DataFrame, day_start: datetime) -> pd.DataFrame:
-    """Extract first/last trade per hour from a day of trades."""
-    if trades.empty:
-        return pd.DataFrame(columns=["hour_start_ms", "hour_end_ms", "K", "S_T", "Y"])
-
-    trades = trades[["ts_event", "price"]].sort_values("ts_event").reset_index(drop=True)
-
-    rows = []
-    for hour in range(24):
-        hour_start = day_start + timedelta(hours=hour)
-        hour_end = hour_start + timedelta(hours=1)
-        hour_start_ms = int(hour_start.timestamp() * 1000)
-        hour_end_ms = int(hour_end.timestamp() * 1000)
-
-        mask = (trades["ts_event"] >= hour_start_ms) & (trades["ts_event"] < hour_end_ms)
-        hour_trades = trades[mask]
-
-        if len(hour_trades) >= 2:
-            K = float(hour_trades.iloc[0]["price"])
-            S_T = float(hour_trades.iloc[-1]["price"])
-            rows.append({
-                "hour_start_ms": hour_start_ms,
-                "hour_end_ms": hour_end_ms,
-                "K": K,
-                "S_T": S_T,
-                "Y": 1 if S_T > K else 0,
-            })
-
-    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
