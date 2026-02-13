@@ -50,7 +50,7 @@ class DataConfig:
     default_lookback_hours: int = 3
 
     # Cache configuration for resampled BBO data
-    cache_dir: Path = field(default_factory=lambda: Path("data/resampled_bbo"))
+    cache_dir: Path = field(default_factory=lambda: Path("data/resampled_data"))
     cache_enabled: bool = True
     cache_max_size_gb: float = 10.0
 

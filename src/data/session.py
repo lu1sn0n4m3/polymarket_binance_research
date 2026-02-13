@@ -725,7 +725,122 @@ class HourlyMarketSession:
             df["pm_mid"] = np.nan
         
         return df.reset_index(drop=True)
-    
+
+    # -------------------------------------------------------------------------
+    # Resampled Data Convenience Methods
+    # -------------------------------------------------------------------------
+
+    def binance_resampled(
+        self,
+        interval: Literal["500ms", "1s", "5s"] = "1s",
+        columns: list[str] | None = None,
+        include_lookback: bool = False,
+    ) -> pd.DataFrame:
+        """Load resampled Binance data for this market hour (or with lookback).
+
+        This is a convenience method that loads cached resampled Binance data
+        instead of raw S3 data, providing 10-50x faster loading.
+
+        Args:
+            interval: Resampling interval ("500ms", "1s", or "5s")
+            columns: Optional column selection (e.g., ["ts_recv", "mid_px", "spread"])
+                    If None, returns all columns
+            include_lookback: If True, include lookback period before market start
+
+        Returns:
+            Resampled Binance DataFrame with columns:
+                - ts_recv: Timestamp (epoch milliseconds)
+                - bid_px, ask_px: Best bid/ask prices (USD)
+                - bid_sz, ask_sz: Best bid/ask sizes
+                - mid_px: Mid price
+                - spread: Bid-ask spread
+
+        Example:
+            >>> session = load_session("BTC", date(2026, 1, 19), 9)
+            >>> # Load with column selection for efficiency
+            >>> bnc = session.binance_resampled("1s", columns=["ts_recv", "mid_px"])
+            >>> # With lookback for volatility estimation
+            >>> bnc_with_lookback = session.binance_resampled("1s", include_lookback=True)
+        """
+        from src.data.easy_api import load_binance
+
+        start = self.lookback_start if include_lookback else self.utc_start
+        return load_binance(start, self.utc_end, self.asset, interval, columns)
+
+    def polymarket_resampled(
+        self,
+        interval: Literal["500ms", "1s", "5s"] = "1s",
+    ) -> pd.DataFrame:
+        """Load resampled Polymarket data for this specific market.
+
+        This is a convenience method that loads cached resampled Polymarket data
+        instead of raw S3 data.
+
+        **Important:** Returns data for the primary token (alphabetically first).
+        Prices always represent "Up" probability after automatic normalization
+        based on market outcome.
+
+        Args:
+            interval: Resampling interval ("500ms", "1s", or "5s")
+
+        Returns:
+            Resampled Polymarket DataFrame with columns:
+                - ts_recv: Timestamp (epoch milliseconds)
+                - bid, ask: Best bid/ask prices (0-1 probability scale)
+                - bid_sz, ask_sz: Best bid/ask sizes
+                - mid: Mid price (Up probability)
+                - spread: Bid-ask spread
+                - microprice: Size-weighted mid price
+
+        Example:
+            >>> session = load_session("BTC", date(2026, 1, 19), 9)
+            >>> pm = session.polymarket_resampled("1s")
+            >>> print(f"Opening Up probability: {pm['mid'].iloc[0]:.3f}")
+        """
+        from src.data.easy_api import load_polymarket_market
+
+        return load_polymarket_market(
+            self.asset, self.market_date, self.hour_et, interval
+        )
+
+    def aligned_resampled(
+        self,
+        interval: Literal["500ms", "1s", "5s"] = "1s",
+        method: str = "asof_backward",
+        left_suffix: str = "_pm",
+        right_suffix: str = "_bnc",
+    ) -> pd.DataFrame:
+        """Load aligned resampled data for this market.
+
+        Convenience method that loads both Binance and Polymarket resampled data
+        and aligns them by timestamp.
+
+        Args:
+            interval: Resampling interval ("500ms", "1s", or "5s")
+            method: Alignment method:
+                - "asof_backward": For each PM update, get latest BNC state (default)
+                - "asof_forward": For each PM update, get next BNC state
+                - "inner": Only exact timestamp matches
+                - "outer": All timestamps from both venues
+            left_suffix: Suffix for Polymarket columns (default: "_pm")
+            right_suffix: Suffix for Binance columns (default: "_bnc")
+
+        Returns:
+            Aligned DataFrame with both Polymarket and Binance data.
+            Columns will have suffixes to distinguish venues (e.g., "mid_pm", "mid_px_bnc")
+
+        Example:
+            >>> session = load_session("BTC", date(2026, 1, 19), 9)
+            >>> aligned = session.aligned_resampled("1s")
+            >>> # Analyze PM probability vs BTC price
+            >>> print(aligned[["ts_recv", "mid_pm", "mid_px_bnc"]].head())
+        """
+        from src.data.easy_api import align_timestamps
+
+        pm = self.polymarket_resampled(interval)
+        bnc = self.binance_resampled(interval)
+        return align_timestamps(pm, bnc, method, left_suffix, right_suffix)
+
     def clear_cache(self) -> None:
         """Clear all cached data to free memory."""
         self._polymarket_bbo = None

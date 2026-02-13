@@ -4,75 +4,188 @@ A Python framework for analyzing Polymarket hourly binary options on Bitcoin and
 
 ## Overview
 
-This framework is designed for researching and backtesting trading strategies on Polymarket's hourly "Up or Down" binary option markets. These markets pay $1 if the underlying asset (BTC or ETH) closes the hour higher than it opened, and $0 otherwise.
+Polymarket runs hourly "Up or Down" binary option markets: they pay $1 if the underlying asset (BTC or ETH) closes the hour higher than it opened, and $0 otherwise. This framework loads tick-level Binance and Polymarket data from an S3 bucket, resamples it to regular intervals, caches it locally as Parquet files, and provides aligned DataFrames for research and backtesting.
 
-**Key Features:**
-- Load Polymarket and Binance data aligned by receive timestamp (`ts_recv`)
-- Automatic normalization to always show "Up" probability (inferred from resolution)
-- Lookback window support for volatility estimation
-- Interactive Plotly visualizations with dual-axis charts
-- Extensible interfaces for volatility estimators and pricing models
+## How Data Flows
 
-## Quick Start
-
-```python
-from datetime import date
-from src.data import load_session
-from src.viz import plot_session
-
-# Load a market session
-session = load_session(
-    asset="BTC",
-    market_date=date(2026, 1, 19),
-    hour_et=9,  # 9am Eastern Time
-    lookback_hours=3,
-)
-
-# Access aligned data
-df = session.aligned
-print(f"Rows: {len(df)}, Columns: {list(df.columns)}")
-
-# Check outcome
-print(f"Outcome: {session.outcome}")
-
-# Visualize
-fig = plot_session(session)
-fig.show()
+```
+S3 Bucket (Hetzner)                Local Cache                    Your Code
+┌──────────────────┐          ┌─────────────────────┐       ┌──────────────┐
+│ Parquet files     │  fetch   │ data/resampled_data/ │ load  │  DataFrame   │
+│ partitioned by    │ ──────► │  ├─ binance/          │ ────► │  (pandas)    │
+│ venue/stream/     │ resample│  │  └─ asset=BTC/     │       └──────────────┘
+│ date/hour         │  + cache│  │     └─ interval=1s/│
+│                   │         │  │        └─ date=*.parquet
+│                   │         │  └─ polymarket/
+│                   │         │     └─ ...
+└──────────────────┘          └─────────────────────┘
 ```
 
-For a complete walkthrough, see **[`notebooks/01_data_exploration.ipynb`](notebooks/01_data_exploration.ipynb)**.
+### S3 bucket structure
+
+Raw data lives in a Hetzner-hosted S3-compatible bucket. Each file is a single hour of data:
+
+```
+s3://marketdata-archive/prod/
+  venue=binance/stream_id=BTCUSDT/event_type=bbo/date=2026-01-19/hour=14/data.parquet
+  venue=binance/stream_id=BTCUSDT/event_type=trades/date=2026-01-19/hour=14/data.parquet
+  venue=polymarket/stream_id=bitcoin-up-or-down/event_type=bbo/date=2026-01-19/hour=14/data.parquet
+  venue=polymarket/stream_id=bitcoin-up-or-down/event_type=trades/...
+  venue=polymarket/stream_id=bitcoin-up-or-down/event_type=l2_book/...
+```
+
+The framework reads these via DuckDB's `httpfs` extension using S3 credentials from your `.env` file.
+
+### Local cache structure
+
+When data is fetched from S3, it's resampled to a regular time grid (500ms, 1s, or 5s intervals) and saved locally as Parquet:
+
+```
+data/resampled_data/
+  binance/
+    asset=BTC/
+      interval=1s/
+        date=2026-01-15.parquet
+        date=2026-01-16.parquet
+        .metadata.json            # tracks cached dates, row counts, file sizes
+  polymarket/
+    asset=BTC/
+      interval=1s/
+        date=2026-01-19.parquet
+        .metadata.json
+```
+
+Subsequent loads for the same date/interval hit the local cache instead of S3. You can bulk-populate the cache using `scripts/sync_resampled_cache.py` (see [docs/UPDATING_CACHE.md](docs/UPDATING_CACHE.md)).
 
 ---
 
 ## Installation
 
-### 1. Create and activate a virtual environment
-
 ```bash
 cd polymarket_binance_research
 python3.12 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-### 2. Install dependencies
-
-```bash
+source venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-### 3. Configure S3 credentials
-
-Create a `.env` file in the project root:
+Create a `.env` file in the project root with your S3 credentials:
 
 ```
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
 ```
 
-The framework uses these defaults (configurable in `src/config.py`):
-- **Endpoint:** `nbg1.your-objectstorage.com`
-- **Bucket:** `marketdata-archive`
-- **Region:** `eu-central`
+The S3 endpoint, bucket, and region are configured in `src/config.py` (defaults: `nbg1.your-objectstorage.com`, `marketdata-archive`, `eu-central`).
+
+---
+
+## Loading Data
+
+The framework provides two levels of API: a **resampled easy API** for loading continuous time series, and a **session API** for working with individual hourly markets.
+
+### Load Binance data (continuous time series)
+
+Use `load_binance()` to fetch Binance BBO data for any arbitrary time range. The data is automatically fetched from S3 (if not cached), resampled to your chosen interval, and cached locally.
+
+```python
+from src.data import load_binance
+
+bnc = load_binance(
+    start="2026-01-15 09:00:00",   # UTC
+    end="2026-01-20 17:00:00",
+    asset="BTC",                    # "BTC" or "ETH"
+    interval="1s",                  # "500ms", "1s", or "5s"
+    columns=["ts_recv", "mid_px", "spread"],  # optional column selection
+)
+```
+
+Returned columns: `ts_recv` (epoch ms), `bid_px`, `ask_px`, `bid_sz`, `ask_sz`, `mid_px`, `spread`.
+
+### Load a Polymarket hourly market
+
+Each Polymarket market is independent and covers a single hour (in Eastern Time). Use `load_polymarket_market()` to load one:
+
+```python
+from src.data import load_polymarket_market
+
+pm = load_polymarket_market(
+    asset="BTC",
+    date="2026-01-19",
+    hour_et=9,          # 9am-10am Eastern Time
+    interval="1s",
+)
+```
+
+Returned columns: `ts_recv` (epoch ms), `bid`, `ask`, `bid_sz`, `ask_sz`, `mid`, `spread`, `microprice`.
+
+All prices are automatically normalized to represent P(Up) — if the underlying token was "Down", prices are flipped (`Up_bid = 1 - Down_ask`).
+
+### Combine Binance + Polymarket
+
+```python
+from src.data import load_binance, load_polymarket_market, align_timestamps
+
+pm = load_polymarket_market("BTC", "2026-01-19", 9, "1s")
+bnc = load_binance("2026-01-19 14:00:00", "2026-01-19 15:00:00", "BTC", "1s")
+
+combined = align_timestamps(
+    left=pm,
+    right=bnc,
+    method="asof_backward",  # for each PM update, get latest Binance state
+)
+```
+
+### Load a full market session (alternative API)
+
+`load_session()` bundles a Polymarket market with its corresponding Binance data (including a lookback window for volatility estimation) and provides an aligned DataFrame:
+
+```python
+from datetime import date
+from src.data import load_session
+
+session = load_session(
+    asset="BTC",
+    market_date=date(2026, 1, 19),
+    hour_et=9,
+    lookback_hours=3,
+)
+
+df = session.aligned          # Polymarket + Binance joined on ts_recv
+outcome = session.outcome     # MarketOutcome with open/close/return/result
+print(f"Result: {outcome.outcome}, Return: {outcome.return_pct:+.3f}%")
+```
+
+The `aligned` DataFrame has columns prefixed `pm_` (Polymarket) and `bnc_` (Binance).
+
+### Load multiple sessions
+
+```python
+from src.data import load_sessions_range
+
+sessions = load_sessions_range(
+    asset="BTC",
+    start_date=date(2026, 1, 16),
+    end_date=date(2026, 1, 19),
+    hours_et=[9, 10, 11],  # or None for all 24 hours
+    preload=False,
+)
+```
+
+---
+
+## Cache Management
+
+```python
+from src.data import get_cache_status, clear_cache_easy
+
+# Check what's cached
+status = get_cache_status("binance", "BTC", "1s")
+print(f"Cached: {len(status['dates_cached'])} days, {status['size_mb']:.1f} MB")
+
+# Bulk sync from S3 (see docs/UPDATING_CACHE.md for full options)
+# python scripts/sync_resampled_cache.py --venue binance --asset BTC --interval 1s \
+#     --start 2026-01-15 --end 2026-02-01
+```
 
 ---
 
@@ -81,439 +194,36 @@ The framework uses these defaults (configurable in `src/config.py`):
 ```
 polymarket_binance_research/
 ├── src/
-│   ├── __init__.py
-│   ├── config.py              # S3 and data configuration
-│   │
-│   ├── data/                  # Data loading and alignment
-│   │   ├── connection.py      # DuckDB + S3 setup
-│   │   ├── loaders.py         # Raw data loaders
-│   │   ├── alignment.py       # ASOF join, time bucketing
-│   │   └── session.py         # HourlyMarketSession (core abstraction)
-│   │
-│   ├── features/              # Feature computation
-│   │   ├── microstructure.py  # Microprice, VWAP, imbalance
-│   │   ├── volatility.py      # Realized volatility estimators
-│   │   └── historical.py      # Cross-session features
-│   │
-│   ├── pricing/               # Pricing models
-│   │   └── base.py            # Pricer interface + examples
-│   │
-│   └── viz/                   # Visualization
-│       ├── timeseries.py      # Dual-axis price charts
-│       └── book.py            # Order book depth charts
-│
-├── notebooks/
-│   └── 01_data_exploration.ipynb  # Getting started notebook
-│
-├── tests/                     # Unit tests
+│   ├── config.py                # S3 and data configuration
+│   ├── data/
+│   │   ├── easy_api.py          # Primary API: load_binance, load_polymarket_market, align_timestamps
+│   │   ├── session.py           # HourlyMarketSession abstraction
+│   │   ├── resampled_bbo.py     # Binance resampling + cache logic
+│   │   ├── resampled_polymarket.py  # Polymarket resampling + cache logic
+│   │   ├── cache_manager.py     # Local Parquet cache I/O
+│   │   ├── alignment.py         # ASOF join, time bucketing, grid resampling
+│   │   ├── loaders.py           # Raw S3 data loading (internal)
+│   │   └── connection.py        # DuckDB + S3 setup (internal)
+│   ├── features/                # Microstructure, volatility, historical features
+│   ├── pricing/                 # Pricer interface + models (GaussianEWMA, Fundamental)
+│   └── viz/                     # Plotly visualizations (session charts, order books)
+├── scripts/                     # CLI utilities for cache sync, data checks, analysis
+├── pricer_calibration/          # Model calibration pipeline (separate package)
+├── data/resampled_data/         # Local Parquet cache (git-ignored)
 ├── docs/
-│   └── DATA_GUIDE.md          # Data schema documentation
-├── pyproject.toml
-└── requirements.txt
+│   ├── USER_GUIDE.md            # Full API reference with recipes
+│   └── UPDATING_CACHE.md        # Cache sync guide
+└── pyproject.toml
 ```
-
----
-
-## Core Concepts
-
-### The `HourlyMarketSession`
-
-The central abstraction is `HourlyMarketSession` - it represents one hourly Polymarket market (e.g., "BTC Up/Down, Jan 19, 9am-10am ET") with all associated data.
-
-```python
-from datetime import date
-from src.data import load_session
-
-session = load_session(
-    asset="BTC",           # "BTC" or "ETH"
-    market_date=date(2026, 1, 19),
-    hour_et=9,             # Hour in Eastern Time (0-23)
-    lookback_hours=3,      # Hours of Binance data before market for volatility
-)
-```
-
-**Key Properties:**
-
-| Property | Description |
-|----------|-------------|
-| `session.aligned` | Main DataFrame with Polymarket + Binance data joined on `ts_recv` |
-| `session.outcome` | `MarketOutcome` with open/close prices and result |
-| `session.token_is_up` | `True` if loaded token is "Up", `False` if "Down" (inferred) |
-| `session.polymarket_bbo` | Raw Polymarket BBO data |
-| `session.polymarket_book` | L2 order book snapshots |
-| `session.binance_bbo` | Binance BBO for the market hour |
-| `session.binance_lookback_trades` | Binance trades including lookback period |
-
-**Time Properties:**
-
-| Property | Description |
-|----------|-------------|
-| `session.utc_start` | Market start in UTC |
-| `session.utc_end` | Market end in UTC |
-| `session.lookback_start` | Start of lookback window in UTC |
-
-### The Aligned DataFrame
-
-`session.aligned` is the main data structure you'll work with. It contains:
-
-**Polymarket columns (normalized to "Up" probability):**
-- `pm_bid`, `pm_ask` - Best bid/ask prices (0-1 probability)
-- `pm_bid_sz`, `pm_ask_sz` - Best bid/ask sizes
-- `pm_mid` - Mid price
-- `pm_spread` - Bid-ask spread
-- `pm_microprice` - Size-weighted mid price
-
-**Binance columns (ASOF-joined):**
-- `bnc_bid`, `bnc_ask` - Best bid/ask prices in USD
-- `bnc_mid` - Mid price
-- `bnc_spread` - Spread
-
-**Important:** Polymarket prices are **automatically normalized** to always represent P(Up). If the loaded token was "Down", prices are flipped using `Up_bid = 1 - Down_ask`.
-
-### Market Outcome
-
-```python
-outcome = session.outcome
-
-print(f"Open: ${outcome.open_price:,.2f}")
-print(f"Close: ${outcome.close_price:,.2f}")
-print(f"Return: {outcome.return_pct:+.3f}%")
-print(f"Result: {outcome.outcome}")  # "up", "down", or "flat"
-```
-
-The open price is the **first trade** after the hour begins; the close price is the **last trade** in the hour.
-
----
-
-## Data Loading
-
-### Loading Raw Data
-
-For more control, use the low-level loaders:
-
-```python
-from datetime import datetime, timezone
-from src.data import (
-    load_binance_bbo,
-    load_binance_trades,
-    load_polymarket_bbo,
-    load_polymarket_trades,
-    load_polymarket_book,
-)
-
-start = datetime(2026, 1, 19, 14, 0, tzinfo=timezone.utc)
-end = datetime(2026, 1, 19, 15, 0, tzinfo=timezone.utc)
-
-# Load Binance BBO
-bnc_bbo = load_binance_bbo(start, end, asset="BTC")
-
-# Load Polymarket order book
-pm_book = load_polymarket_book(start, end, asset="BTC")
-```
-
-### Loading Multiple Sessions
-
-```python
-from src.data.session import load_sessions_range
-
-sessions = load_sessions_range(
-    asset="BTC",
-    start_date=date(2026, 1, 16),
-    end_date=date(2026, 1, 19),
-    hours_et=[9, 10, 11],  # Specific hours, or None for all 24
-    preload=False,         # Don't load data until accessed
-)
-
-for session in sessions:
-    if session.outcome:
-        print(f"{session.market_date} {session.hour_et}:00 ET -> {session.outcome.outcome}")
-```
-
----
-
-## Alignment Strategies
-
-The framework provides multiple ways to align Polymarket and Binance data:
-
-### ASOF Join (Default)
-
-For each Polymarket update, get the latest Binance state:
-
-```python
-from src.data.alignment import align_asof
-
-aligned = align_asof(
-    left=polymarket_df,
-    right=binance_df,
-    direction="backward",  # Latest Binance at or before Polymarket timestamp
-)
-```
-
-### Time Bucketing
-
-Aggregate both sources into fixed time buckets:
-
-```python
-from src.data.alignment import align_bucketed
-
-aligned = align_bucketed(
-    left=polymarket_df,
-    right=binance_df,
-    bucket_ms=1000,        # 1-second buckets
-    agg_method="last",     # Take last value in each bucket
-)
-```
-
-### Resampling to Grid
-
-Resample to a regular time grid (useful for volatility calculation):
-
-```python
-from src.data.alignment import resample_to_grid
-
-resampled = resample_to_grid(
-    df=binance_bbo,
-    grid_ms=100,           # 100ms grid
-    method="ffill",        # Forward-fill missing values
-)
-```
-
----
-
-## Feature Computation
-
-### Microstructure Features
-
-```python
-from src.features import (
-    compute_microprice,
-    compute_book_imbalance,
-    compute_spread_bps,
-    compute_vwap,
-)
-
-df = session.aligned
-
-# Microprice (size-weighted mid)
-microprice = compute_microprice(df["pm_bid"], df["pm_ask"], df["pm_bid_sz"], df["pm_ask_sz"])
-
-# Book imbalance: (bid_sz - ask_sz) / (bid_sz + ask_sz)
-imbalance = compute_book_imbalance(df["pm_bid_sz"], df["pm_ask_sz"])
-
-# Spread in basis points
-spread_bps = compute_spread_bps(df["pm_bid"], df["pm_ask"])
-```
-
-### Volatility Estimation
-
-```python
-from src.features import SimpleRealizedVol, TradeBasedVol
-
-# Simple realized vol from resampled prices
-vol_estimator = SimpleRealizedVol(sample_interval_ms=1000)
-vol = vol_estimator.compute(session.binance_lookback_trades, price_col="price")
-
-# Rolling volatility
-rolling_vol = vol_estimator.compute_rolling(
-    session.binance_lookback_trades,
-    window_seconds=300,  # 5-minute window
-)
-```
-
-### Historical Features
-
-```python
-from src.features.historical import (
-    compute_hourly_returns,
-    get_historical_hourly_stats,
-    compute_same_hour_features,
-)
-
-# Get stats for 9am hour over multiple days
-stats = get_historical_hourly_stats(
-    asset="BTC",
-    hour_et=9,
-    start_date=date(2026, 1, 16),
-    end_date=date(2026, 1, 19),
-)
-print(f"Up rate: {stats['up_rate']:.1%}")
-print(f"Mean return: {stats['mean_return']:.3f}%")
-```
-
----
-
-## Visualization
-
-### Session Chart (Dual-Axis)
-
-```python
-from src.viz import plot_session
-
-fig = plot_session(
-    session,
-    pm_fields=["pm_bid", "pm_ask", "pm_mid", "pm_microprice"],
-    bnc_fields=["bnc_mid"],
-    show_outcome=True,
-)
-fig.show()
-```
-
-This creates an interactive Plotly chart with:
-- **Left Y-axis:** Polymarket probability (0-100%)
-- **Right Y-axis:** Binance price (USD)
-- **Vertical line:** Market close with outcome annotation
-
-### Order Book Visualization
-
-```python
-from src.viz.book import plot_book_depth, plot_book_depth_over_time
-
-# Single snapshot
-book = session.polymarket_book
-row = book.iloc[len(book) // 2]
-
-fig = plot_book_depth(
-    bid_prices=row["bid_prices"],
-    bid_sizes=row["bid_sizes"],
-    ask_prices=row["ask_prices"],
-    ask_sizes=row["ask_sizes"],
-)
-fig.show()
-
-# Depth over time
-fig = plot_book_depth_over_time(book, depth=5, sample_interval=20)
-fig.show()
-```
-
----
-
-## Pricing Models
-
-The framework provides an abstract `Pricer` interface for implementing pricing models:
-
-```python
-from src.pricing import Pricer, PricerOutput
-
-class MyPricer(Pricer):
-    def price(
-        self,
-        time_to_expiry_sec: float,
-        realized_vol: float,
-        current_price: float | None = None,
-        strike_price: float | None = None,
-        **features,
-    ) -> PricerOutput:
-        # Your pricing logic here
-        up_prob = 0.5  # Placeholder
-        
-        return PricerOutput.from_up_prob(
-            up_prob,
-            spread=0.02,  # 2% spread for fair bid/ask
-        )
-```
-
-**Example with the built-in MoneynessPricer:**
-
-```python
-from src.pricing.base import MoneynessPricer
-
-pricer = MoneynessPricer(sensitivity=100)
-
-output = pricer.price(
-    time_to_expiry_sec=1800,  # 30 minutes left
-    realized_vol=0.5,
-    current_price=session.outcome.open_price * 1.001,
-    strike_price=session.outcome.open_price,
-)
-
-print(f"P(Up): {output.up_prob:.2%}")
-print(f"Fair bid: {output.up_fair_bid:.4f}")
-print(f"Fair ask: {output.up_fair_ask:.4f}")
-```
-
----
-
-## Configuration
-
-### S3 Configuration
-
-```python
-from src.config import set_config, DataConfig, S3Config
-
-set_config(DataConfig(
-    s3=S3Config(
-        endpoint="your-endpoint.com",
-        bucket="your-bucket",
-        region="your-region",
-        access_key="...",
-        secret_key="...",
-    )
-))
-```
-
-### Default Lookback
-
-```python
-from src.config import get_config
-
-config = get_config()
-config.default_lookback_hours = 2  # Change default from 3 to 2
-```
-
----
-
-## Data Schemas
-
-See **[`docs/DATA_GUIDE.md`](docs/DATA_GUIDE.md)** for detailed documentation on:
-- S3 bucket structure and partitioning
-- Binance BBO and trade schemas
-- Polymarket BBO, trade, and L2 book schemas
-- Timestamp handling (`ts_event` vs `ts_recv`)
-- DuckDB query examples
 
 ---
 
 ## Important Notes
 
-### Timestamp Convention
-
-All timestamps are **milliseconds since Unix epoch (UTC)**. Use `ts_recv` for backtesting as it reflects what you would have seen in real-time including network latency.
-
-### Polymarket Price Normalization
-
-The framework **automatically normalizes** Polymarket prices to always represent P(Up):
-- Detects whether the loaded token is "Up" or "Down" based on resolution
-- If "Down" token was loaded, flips prices: `Up_bid = 1 - Down_ask`
-
-Check which token was loaded:
-```python
-print(f"Token is Up: {session.token_is_up}")
-```
-
-### Eastern Time Handling
-
-Polymarket hourly markets are based on **Eastern Time (ET)**. The framework handles timezone conversion automatically:
-- `hour_et=9` means 9:00-10:00 AM Eastern
-- Internally converted to UTC for data loading
-- During EST: ET = UTC-5; During EDT: ET = UTC-4
-
----
-
-## Examples
-
-For hands-on examples covering all functionality, see the Jupyter notebook:
-
-**[`notebooks/01_data_exploration.ipynb`](notebooks/01_data_exploration.ipynb)**
-
-Topics covered:
-1. Loading and inspecting a session
-2. Visualizing prices and order book
-3. Computing volatility
-4. Microstructure features
-5. Loading multiple sessions
-6. Using the pricer interface
-
----
+- **Timestamps** are milliseconds since Unix epoch, UTC. Use `ts_recv` (receive time) for backtesting.
+- **Polymarket prices** are automatically normalized to P(Up). Check `session.token_is_up` to see which token was loaded.
+- **Eastern Time**: Polymarket markets are hourly in ET. `hour_et=9` means 9:00–10:00 AM Eastern (UTC-5 in winter, UTC-4 in summer). The framework handles conversion.
+- **Column selection**: Pass `columns=["ts_recv", "mid_px"]` to `load_binance()` to reduce memory usage on large queries.
 
 ## License
 
