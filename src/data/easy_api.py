@@ -53,6 +53,7 @@ import pandas as pd
 
 from src.data.resampled_bbo import load_resampled_bbo
 from src.data.resampled_polymarket import load_resampled_polymarket
+from src.data.resampled_labels import load_resampled_labels
 from src.data.cache_manager import get_cache_info as _get_cache_info, clear_cache as _clear_cache
 from src.data.alignment import align_asof
 
@@ -157,6 +158,54 @@ def load_binance(
         df = df[available_cols]
 
     return df
+
+
+# ============================================================================
+# BINANCE HOURLY LABELS (Opening/Closing Prices + Outcome)
+# ============================================================================
+
+def load_binance_labels(
+    start: str | datetime,
+    end: str | datetime,
+    asset: Literal["BTC", "ETH"] = "BTC",
+    cache_dir: Path | str | None = None,
+    force_reload: bool = False,
+) -> pd.DataFrame:
+    """Load hourly market labels (open/close/outcome) from Binance trades.
+
+    Returns one row per UTC hour with the first and last Binance trade prices.
+    Data is cached as lightweight daily parquet files (~24 rows per day).
+
+    Args:
+        start: Start time as "YYYY-MM-DD HH:MM:SS" or datetime (UTC)
+        end: End time (UTC)
+        asset: "BTC" or "ETH"
+        cache_dir: Override default cache directory
+        force_reload: If True, ignore cache and reload from S3
+
+    Returns:
+        DataFrame with columns:
+            - hour_start_ms: Hour start (epoch ms)
+            - hour_end_ms: Hour end (epoch ms)
+            - K: Opening price (first trade of the hour)
+            - S_T: Closing price (last trade of the hour)
+            - Y: 1 if S_T > K, else 0
+
+    Example:
+        >>> labels = load_binance_labels("2026-01-19", "2026-01-20", "BTC")
+        >>> print(f"{len(labels)} hours labeled")
+        >>> print(f"Up hours: {labels['Y'].sum()}, Down hours: {(1-labels['Y']).sum()}")
+    """
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+
+    return load_resampled_labels(
+        start_dt=start_dt,
+        end_dt=end_dt,
+        asset=asset,
+        cache_dir=Path(cache_dir) if cache_dir else None,
+        force_reload=force_reload,
+    )
 
 
 # ============================================================================

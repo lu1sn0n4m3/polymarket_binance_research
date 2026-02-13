@@ -22,6 +22,7 @@ sys.path.insert(0, str(project_root))
 from src.data import (
     load_resampled_bbo,
     load_resampled_polymarket,
+    load_resampled_labels,
     get_cache_info,
 )
 
@@ -38,6 +39,9 @@ Examples:
 
   # Sync specific date range for both venues
   python scripts/sync_resampled_cache.py --venue binance,polymarket --asset BTC --interval 1s,5s --start-date 2026-01-19 --end-date 2026-02-10
+
+  # Sync hourly labels (open/close/outcome from Binance trades)
+  python scripts/sync_resampled_cache.py --venue binance_labels --asset BTC --interval 1s --start-date 2026-01-19 --end-date 2026-02-10
 
   # Daily cron job (sync last 7 days)
   python scripts/sync_resampled_cache.py --venue binance,polymarket --asset BTC --interval 1s --last-days 7 --incremental --delay 1.0
@@ -134,6 +138,24 @@ def parse_interval_ms(interval_str: str) -> int:
     return mapping[interval_str]
 
 
+def _get_labels_cache_info(asset: str, cache_dir: Path) -> dict:
+    """Get cache info for binance_labels (different path structure than BBO)."""
+    import json
+    label_dir = cache_dir / "binance_labels" / f"asset={asset}"
+    meta_path = label_dir / ".metadata.json"
+    if not meta_path.exists():
+        return {"available_dates": [], "total_rows": 0, "date_range": (None, None), "total_size_mb": 0.0}
+    with open(meta_path) as f:
+        metadata = json.load(f)
+    total_bytes = sum(e.get("file_size_bytes", 0) for e in metadata.get("cached_dates", []))
+    return {
+        "available_dates": [e["date"] for e in metadata.get("cached_dates", [])],
+        "total_rows": metadata.get("total_rows", 0),
+        "date_range": tuple(metadata.get("date_range", [None, None])),
+        "total_size_mb": total_bytes / (1024 * 1024),
+    }
+
+
 def sync_venue_asset_interval(
     venue: str,
     asset: str,
@@ -156,12 +178,15 @@ def sync_venue_asset_interval(
     total_days = (end_date - start_date).days
 
     # Check what's already cached
-    cache_info = get_cache_info(
-        asset=asset,
-        interval_ms=interval_ms,
-        cache_dir=cache_dir,
-        venue=venue,
-    )
+    if venue == "binance_labels":
+        cache_info = _get_labels_cache_info(asset, cache_dir)
+    else:
+        cache_info = get_cache_info(
+            asset=asset,
+            interval_ms=interval_ms,
+            cache_dir=cache_dir,
+            venue=venue,
+        )
 
     print(f"\n{'=' * 70}")
     print(f"SYNCING: {venue.upper()} / {asset} / {interval_str}")
@@ -196,6 +221,8 @@ def sync_venue_asset_interval(
         loader_func = load_resampled_bbo
     elif venue == "polymarket":
         loader_func = load_resampled_polymarket
+    elif venue == "binance_labels":
+        loader_func = None  # handled separately below
     else:
         raise ValueError(f"Unknown venue: {venue}")
 
@@ -225,14 +252,23 @@ def sync_venue_asset_interval(
 
             try:
                 # Load/fetch this day
-                df = loader_func(
-                    start_dt=current_date,
-                    end_dt=next_date,
-                    interval_ms=interval_ms,
-                    asset=asset,
-                    cache_dir=cache_dir,
-                    force_reload=force_reload,
-                )
+                if venue == "binance_labels":
+                    df = load_resampled_labels(
+                        start_dt=current_date,
+                        end_dt=next_date,
+                        asset=asset,
+                        cache_dir=cache_dir,
+                        force_reload=force_reload,
+                    )
+                else:
+                    df = loader_func(
+                        start_dt=current_date,
+                        end_dt=next_date,
+                        interval_ms=interval_ms,
+                        asset=asset,
+                        cache_dir=cache_dir,
+                        force_reload=force_reload,
+                    )
 
                 day_elapsed = time.time() - day_start_time
 
@@ -337,7 +373,7 @@ def main():
     start_date, end_date = parse_date_range(args)
 
     # Validate
-    valid_venues = {"binance", "polymarket"}
+    valid_venues = {"binance", "polymarket", "binance_labels"}
     valid_assets = {"BTC", "ETH"}
     valid_intervals = {"500ms", "1s", "5s"}
 
