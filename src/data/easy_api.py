@@ -315,6 +315,16 @@ def load_polymarket_market(
         force_reload=force_reload,
     )
 
+    if df.empty:
+        return df
+
+    # --- Normalize to "Up" probability ---
+    # The cache stores the "primary" token (alphabetically first), which may
+    # be the Up or Down token.  We use the labels cache (Binance open/close)
+    # to determine the market outcome, then compare with the terminal PM
+    # price to decide whether a flip is needed.
+    df = _normalize_to_up(df, utc_start, utc_end, asset, cache_dir)
+
     return df
 
 
@@ -562,3 +572,77 @@ def _parse_interval(interval: str) -> int:
     if interval not in mapping:
         raise ValueError(f"Invalid interval: {interval}. Must be one of {list(mapping.keys())}")
     return mapping[interval]
+
+
+def _normalize_to_up(
+    df: pd.DataFrame,
+    utc_start: datetime,
+    utc_end: datetime,
+    asset: str,
+    cache_dir: "Path | str | None",
+) -> pd.DataFrame:
+    """Normalize Polymarket prices so they always represent Up probability.
+
+    The resampled cache stores whichever token is alphabetically first (the
+    "primary" token).  That may be Up or Down.  We detect the orientation by
+    comparing the terminal PM mid price with the Binance-based market outcome
+    (from the labels cache).
+
+    Logic (mirrors HourlyMarketSession.token_is_up):
+        outcome=Up  & terminal_mid > 0.5  →  token is Up   (no flip)
+        outcome=Up  & terminal_mid < 0.5  →  token is Down  (flip)
+        outcome=Down & terminal_mid > 0.5  →  token is Down  (flip)
+        outcome=Down & terminal_mid < 0.5  →  token is Up   (no flip)
+    """
+    # Load the label for this hour
+    try:
+        labels = load_resampled_labels(
+            start_dt=utc_start,
+            end_dt=utc_end,
+            asset=asset,
+            cache_dir=Path(cache_dir) if cache_dir else None,
+        )
+    except Exception:
+        return df  # Can't normalize without labels — return raw
+
+    utc_start_ms = int(utc_start.timestamp() * 1000)
+    if labels.empty:
+        return df
+
+    match = labels[labels["hour_start_ms"] == utc_start_ms]
+    if match.empty:
+        return df
+
+    Y = int(match.iloc[0]["Y"])  # 1 = Up, 0 = Down
+
+    # Terminal mid price of the PM data
+    terminal_mid = (df["bid"].iloc[-1] + df["ask"].iloc[-1]) / 2
+    price_went_high = terminal_mid > 0.5
+
+    # Determine if token is Up
+    if Y == 1:  # outcome = Up
+        token_is_up = price_went_high
+    else:       # outcome = Down
+        token_is_up = not price_went_high
+
+    if token_is_up:
+        return df  # Already represents Up probability
+
+    # Flip: Up_bid = 1 - Down_ask,  Up_ask = 1 - Down_bid
+    df = df.copy()
+    new_bid = 1.0 - df["ask"]
+    new_ask = 1.0 - df["bid"]
+    new_bid_sz = df["ask_sz"].copy()
+    new_ask_sz = df["bid_sz"].copy()
+
+    df["bid"] = new_bid
+    df["ask"] = new_ask
+    df["bid_sz"] = new_bid_sz
+    df["ask_sz"] = new_ask_sz
+    df["mid"] = (df["bid"] + df["ask"]) / 2
+    df["spread"] = df["ask"] - df["bid"]
+    if "microprice" in df.columns:
+        total_sz = df["bid_sz"] + df["ask_sz"]
+        df["microprice"] = df["bid"] + (df["ask"] - df["bid"]) * df["bid_sz"] / total_sz.clip(lower=1e-12)
+
+    return df
