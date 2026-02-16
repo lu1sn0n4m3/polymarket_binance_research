@@ -12,12 +12,15 @@ Pipeline:
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from pricing.features.seasonal_vol import SeasonalVolCurve, compute_seasonal_vol
 from pricing.features.realized_vol import compute_rv_ewma
+
+_ET = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -122,7 +125,15 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     # Build market_id from labels
     sample_step_ms = int(cfg.sample_interval_sec * 1000)
 
+    # Polymarket loader (optional — graceful if unavailable)
+    try:
+        from src.data import load_polymarket_market
+        _has_pm = True
+    except ImportError:
+        _has_pm = False
+
     rows = []
+    pm_hit, pm_miss = 0, 0
     for _, lbl in labels.iterrows():
         hour_start_ms = int(lbl["hour_start_ms"])
         hour_end_ms = int(lbl["hour_end_ms"])
@@ -140,6 +151,27 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
         if len(indices) == 0:
             continue
 
+        # Load Polymarket data for this hour (UTC → ET conversion)
+        pm_ts_arr, pm_mid_arr = None, None
+        if _has_pm:
+            try:
+                et_dt = dt_start.astimezone(_ET)
+                pm = load_polymarket_market(
+                    cfg.asset, et_dt.strftime("%Y-%m-%d"), et_dt.hour, "1s",
+                )
+                if not pm.empty:
+                    pm_in = (pm["ts_recv"].values >= hour_start_ms) & (pm["ts_recv"].values < hour_end_ms)
+                    if pm_in.sum() > 0:
+                        pm_ts_arr = pm["ts_recv"].values[pm_in]
+                        pm_mid_arr = pm["mid"].values[pm_in].astype(np.float64)
+                        pm_hit += 1
+                    else:
+                        pm_miss += 1
+                else:
+                    pm_miss += 1
+            except Exception:
+                pm_miss += 1
+
         # Subsample at sample_interval_sec spacing
         first_ts = ts_bbo[indices[0]]
         sample_times = np.arange(first_ts, hour_end_ms, sample_step_ms)
@@ -155,6 +187,14 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
             if tau <= 0:
                 continue
 
+            # Nearest-neighbor PM mid price
+            pm_val = np.nan
+            if pm_ts_arr is not None:
+                pm_idx = np.searchsorted(pm_ts_arr, ts_bbo[i])
+                pm_idx = np.clip(pm_idx, 0, len(pm_ts_arr) - 1)
+                if abs(pm_ts_arr[pm_idx] - ts_bbo[i]) < 5000:  # within 5s
+                    pm_val = float(pm_mid_arr[pm_idx])
+
             rows.append({
                 "market_id": market_id,
                 "t": int(ts_bbo[i]),
@@ -165,7 +205,11 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
                 "sigma_tod": float(sigma_tod_all[i]),
                 "sigma_rv": float(sigma_rv_all[i]),
                 "sigma_rel": float(sigma_rel_all[i]),
+                "pm_mid": pm_val,
             })
+
+    if _has_pm:
+        print(f"  Polymarket: {pm_hit} markets matched, {pm_miss} missing")
 
     dataset = pd.DataFrame(rows)
 
