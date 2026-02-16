@@ -23,6 +23,11 @@ class SimpleGaussianModel(Model):
         z = a * np.log(S / K) / (sigma_rv * sqrt_tau)
         return np.clip(norm.cdf(z), 1e-9, 1.0 - 1e-9)
 
+    def predict_variance(self, params, S, K, tau, features):
+        a = params["a"]
+        sigma_eff = features["sigma_rv"] / a
+        return sigma_eff ** 2 * tau
+
     def param_names(self):
         return ["a"]
 

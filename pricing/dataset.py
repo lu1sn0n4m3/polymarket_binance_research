@@ -44,7 +44,8 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     """Build calibration dataset from 1s Binance data.
 
     Returns DataFrame with columns:
-        market_id, t, S, K, tau, y, sigma_tod, sigma_rv, sigma_rel
+        market_id, t, S, K, tau, y, sigma_tod, sigma_rv, sigma_rel,
+        time_since_move, hour_et
 
     The dataset is cached as parquet in cfg.output_dir.
     """
@@ -94,7 +95,7 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     # Step 4: Compute EWMA realized vol
     print(f"Computing EWMA sigma_rv (H={cfg.ewma_half_life_sec}s) ...")
     ts_rv, sigma_rv_full = compute_rv_ewma(
-        bbo, half_life_sec=cfg.ewma_half_life_sec,
+        bbo, seasonal_vol=seasonal, half_life_sec=cfg.ewma_half_life_sec,
     )
     print(f"  {len(ts_rv):,} tick-time sigma_rv values")
 
@@ -122,6 +123,17 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     # sigma_rel
     sigma_rel_all = sigma_rv_all / np.maximum(sigma_tod_all, 1e-12)
 
+    # Precompute time-since-last-move for all BBO rows
+    _valid_mid = ~np.isnan(mid_bbo)
+    _changed = np.zeros(len(mid_bbo), dtype=bool)
+    _changed[0] = True
+    _changed[1:] = (mid_bbo[1:] != mid_bbo[:-1]) & _valid_mid[1:] & _valid_mid[:-1]
+    _change_times_ms = ts_bbo[_changed]
+
+    _si = np.searchsorted(_change_times_ms, ts_bbo, side="right") - 1
+    _si = np.clip(_si, 0, len(_change_times_ms) - 1)
+    time_since_move_all = np.maximum((ts_bbo - _change_times_ms[_si]) / 1000.0, 0.0)
+
     # Build market_id from labels
     sample_step_ms = int(cfg.sample_interval_sec * 1000)
 
@@ -138,11 +150,13 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
         hour_start_ms = int(lbl["hour_start_ms"])
         hour_end_ms = int(lbl["hour_end_ms"])
         K = float(lbl["K"])
+        S_T = float(lbl["S_T"])
         Y = int(lbl["Y"])
 
         # Market ID: ASSET_YYYYMMDD_HH
         dt_start = datetime.fromtimestamp(hour_start_ms / 1000, tz=timezone.utc)
         market_id = f"{cfg.asset}_{dt_start.strftime('%Y%m%d_%H')}"
+        et_hour = dt_start.astimezone(_ET).hour
 
         # Find BBO rows within this hour
         mask = (ts_bbo >= hour_start_ms) & (ts_bbo < hour_end_ms)
@@ -205,6 +219,9 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
                 "sigma_tod": float(sigma_tod_all[i]),
                 "sigma_rv": float(sigma_rv_all[i]),
                 "sigma_rel": float(sigma_rel_all[i]),
+                "S_T": S_T,
+                "time_since_move": float(time_since_move_all[i]),
+                "hour_et": et_hour,
                 "pm_mid": pm_val,
             })
 
@@ -214,7 +231,7 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     dataset = pd.DataFrame(rows)
 
     # Drop rows with NaN or inf in any feature column
-    feature_cols = ["S", "K", "sigma_tod", "sigma_rv", "sigma_rel"]
+    feature_cols = ["S", "K", "S_T", "sigma_tod", "sigma_rv", "sigma_rel"]
     n_before = len(dataset)
     dataset = dataset.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_cols)
     n_dropped = n_before - len(dataset)

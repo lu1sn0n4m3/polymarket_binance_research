@@ -80,6 +80,21 @@ class Model(ABC):
         """(lower, upper) bounds for each parameter."""
         ...
 
+    def predict_variance(
+        self,
+        params: dict[str, float],
+        S: np.ndarray,
+        K: np.ndarray,
+        tau: np.ndarray,
+        features: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        """Predicted variance of log(S_T/S) over [t, T].
+
+        Returns sigma_eff^2 * tau (or sigma_total^2 * tau for jump models).
+        Used by variance-targeted calibration (QLIKE objective).
+        """
+        raise NotImplementedError(f"{self.name} does not implement predict_variance()")
+
     def required_features(self) -> list[str]:
         """Feature columns this model needs from the dataset.
 

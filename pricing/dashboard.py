@@ -171,7 +171,7 @@ def load_single_market_data(
     seasonal = compute_seasonal_vol(bnc)
 
     # EWMA sigma_rv
-    ts_rv, sigma_rv_full = compute_rv_ewma(bnc, half_life_sec=ewma_half_life_sec)
+    ts_rv, sigma_rv_full = compute_rv_ewma(bnc, seasonal_vol=seasonal, half_life_sec=ewma_half_life_sec)
     if len(ts_rv) == 0:
         return None
 
@@ -202,10 +202,27 @@ def load_single_market_data(
     S_arr = mid_market.astype(np.float64)
     K_arr = np.full_like(S_arr, K)
 
+    # Time since last price change
+    _valid_mid = ~np.isnan(mid_bnc)
+    _ch = np.zeros(len(mid_bnc), dtype=bool)
+    _ch[0] = True
+    _ch[1:] = (mid_bnc[1:] != mid_bnc[:-1]) & _valid_mid[1:] & _valid_mid[:-1]
+    _change_ts = ts_bnc[_ch]
+    _si = np.searchsorted(_change_ts, ts_market, side="right") - 1
+    _si = np.clip(_si, 0, len(_change_ts) - 1)
+    time_since_move_market = np.maximum((ts_market - _change_ts[_si]) / 1000.0, 0.0)
+
+    # ET hour (constant for all rows in this market)
+    from zoneinfo import ZoneInfo
+    _hour_et_val = utc_start.astimezone(ZoneInfo("America/New_York")).hour
+    hour_et_market = np.full(len(ts_market), _hour_et_val, dtype=np.float64)
+
     features = {
         "sigma_tod": sigma_tod_market.astype(np.float64),
         "sigma_rv": sigma_rv_market.astype(np.float64),
         "sigma_rel": sigma_rel_market.astype(np.float64),
+        "time_since_move": time_since_move_market.astype(np.float64),
+        "hour_et": hour_et_market,
     }
 
     # Polymarket

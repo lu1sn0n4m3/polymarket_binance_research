@@ -35,6 +35,16 @@ class GaussianModel(Model):
         p = norm.cdf(-z)
         return np.clip(p, 1e-9, 1.0 - 1e-9)
 
+    def predict_variance(self, params, S, K, tau, features):
+        a0 = params["a0"]
+        a1 = params["a1"]
+        beta = params["beta"]
+        tau_min = tau / 60.0
+        a_tau = a0 + a1 * np.sqrt(np.maximum(tau_min, 0))
+        sigma_eff = a_tau * features["sigma_tod"] * np.power(
+            np.maximum(features["sigma_rel"], 1e-12), beta)
+        return sigma_eff ** 2 * tau
+
     def param_names(self):
         return ["a0", "a1", "beta"]
 
