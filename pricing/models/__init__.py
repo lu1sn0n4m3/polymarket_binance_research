@@ -6,6 +6,7 @@ from pricing.models.base import Model, CalibrationResult
 MODEL_REGISTRY = {
     "simple_gaussian": ("pricing.models.simple_gaussian", "SimpleGaussianModel"),
     "gaussian": ("pricing.models.gaussian", "GaussianModel"),
+    "student_t": ("pricing.models.student_t", "StudentTModel"),
 }
 
 

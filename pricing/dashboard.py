@@ -548,6 +548,79 @@ def render_model_vs_pm_view(model: Model, params: dict, dataset: pd.DataFrame, r
     )
     st.plotly_chart(fig, width="stretch")
 
+    # ===== Hour-of-day breakdown =====
+    st.subheader("Log Loss by Hour of Day (ET)")
+
+    # Extract ET hour from market_id (format: ASSET_YYYYMMDD_HH, HH is UTC)
+    def _market_id_to_et_hour(mid):
+        try:
+            parts = mid.split("_")
+            utc_h = int(parts[2])
+            d = datetime.strptime(parts[1], "%Y%m%d").replace(tzinfo=timezone.utc)
+            return d.replace(hour=utc_h).astimezone(ET).hour
+        except Exception:
+            return -1
+
+    et_hours_all = np.array([_market_id_to_et_hour(m) for m in dataset["market_id"].values])
+    et_hours_v = et_hours_all[pm_valid]
+
+    # Compute per-hour LL for both
+    hour_labels = [f"{h:02d}" for h in range(24)]
+    hour_model_ll, hour_pm_ll, hour_diff, hour_n = [], [], [], []
+    for h in range(24):
+        hm = et_hours_v == h
+        n_h = hm.sum()
+        if n_h > 10:
+            ml = log_loss(y_v[hm], p_m[hm])
+            pl = log_loss(y_v[hm], p_pm[hm])
+            hour_model_ll.append(ml)
+            hour_pm_ll.append(pl)
+            hour_diff.append(pl - ml)  # positive = model wins
+            hour_n.append(n_h)
+        else:
+            hour_model_ll.append(np.nan)
+            hour_pm_ll.append(np.nan)
+            hour_diff.append(0)
+            hour_n.append(n_h)
+
+    fig_tod = make_subplots(
+        rows=2, cols=1, row_heights=[0.6, 0.4],
+        shared_xaxes=True, vertical_spacing=0.06,
+        subplot_titles=["LL by Hour (ET)", "Model Advantage (PM LL − Model LL)"],
+    )
+
+    # Top: Model vs PM log loss lines
+    fig_tod.add_trace(go.Scatter(
+        x=hour_labels, y=hour_model_ll, name="Model",
+        mode="lines+markers", line=dict(color=COLORS["model"], width=2),
+        marker=dict(size=6),
+    ), row=1, col=1)
+    fig_tod.add_trace(go.Scatter(
+        x=hour_labels, y=hour_pm_ll, name="Polymarket",
+        mode="lines+markers", line=dict(color=COLORS["pm_mid"], width=2),
+        marker=dict(size=6),
+    ), row=1, col=1)
+    fig_tod.add_hline(y=ll_baseline, line_dash="dot", line_color="gray", row=1, col=1)
+    fig_tod.update_yaxes(title_text="Log Loss", row=1, col=1)
+
+    # Bottom: advantage bars (green = model wins, red = PM wins)
+    bar_colors = ["#22c55e" if d > 0 else "#ef4444" for d in hour_diff]
+    fig_tod.add_trace(go.Bar(
+        x=hour_labels, y=hour_diff, marker_color=bar_colors,
+        showlegend=False,
+        hovertemplate="Hour %{x} ET<br>Advantage: %{y:+.4f}<extra></extra>",
+    ), row=2, col=1)
+    fig_tod.add_hline(y=0, line_color="black", line_width=1, row=2, col=1)
+    fig_tod.update_xaxes(title_text="Hour (ET)", row=2, col=1)
+    fig_tod.update_yaxes(title_text="LL(PM) − LL(Model)", row=2, col=1)
+
+    fig_tod.update_layout(
+        height=450, showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+        margin=dict(l=50, r=30, t=30, b=50),
+    )
+    st.plotly_chart(fig_tod, width="stretch")
+
     # Per-market breakdown in expander
     with st.expander("Per-market log loss"):
         _render_per_market_ll(dataset, p_pred, pm_valid, p_pm)
