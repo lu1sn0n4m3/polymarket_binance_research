@@ -28,8 +28,8 @@ from scipy.stats import norm
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from pricing.models import MODEL_REGISTRY, get_model, Model, CalibrationResult
-from pricing.calibrate import calibrate, log_loss
+from pricing.models import get_model, Model, CalibrationResult
+from pricing.calibrate import calibrate_vol, calibrate_tail, log_loss
 from pricing.dataset import build_dataset, DatasetConfig
 from pricing.features.seasonal_vol import compute_seasonal_vol
 from pricing.features.realized_vol import compute_rv_ewma
@@ -278,20 +278,21 @@ def _dataset_arrays(model: Model, params: dict, dataset: pd.DataFrame):
     return S, K, tau, y, feats, p_pred, tau_min, sigma_rel
 
 
-def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame, result_meta: dict):
+def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame):
     """View 1 — model-only calibration diagnostics."""
     _, _, tau, y, _, p_pred, tau_min, sigma_rel = _dataset_arrays(model, params, dataset)
 
     ll = log_loss(y, p_pred)
-    ll_baseline = result_meta["log_loss_baseline"]
+    ll_baseline = log_loss(y, np.full_like(y, y.mean()))
     improvement = (ll_baseline - ll) / ll_baseline * 100
+    n_markets = dataset["market_id"].nunique() if "market_id" in dataset.columns else 0
 
     # Metrics
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Log Loss", f"{ll:.4f}")
     c2.metric("Baseline", f"{ll_baseline:.4f}")
     c3.metric("Improvement", f"{improvement:+.1f}%")
-    c4.metric("Samples", f"{len(y):,} / {result_meta.get('n_markets', 0)} mkts")
+    c4.metric("Samples", f"{len(y):,} / {n_markets} mkts")
 
     with st.expander("Fitted parameters"):
         param_df = pd.DataFrame({"Parameter": list(params.keys()), "Value": list(params.values())})
@@ -416,11 +417,11 @@ def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame, r
 # View 2: Model vs Polymarket
 # ---------------------------------------------------------------------------
 
-def render_model_vs_pm_view(model: Model, params: dict, dataset: pd.DataFrame, result_meta: dict):
+def render_model_vs_pm_view(model: Model, params: dict, dataset: pd.DataFrame):
     """View 2 — head-to-head Model vs Polymarket comparison."""
     _, _, tau, y, _, p_pred, tau_min, sigma_rel = _dataset_arrays(model, params, dataset)
 
-    ll_baseline = result_meta["log_loss_baseline"]
+    ll_baseline = log_loss(y, np.full_like(y, y.mean()))
 
     has_pm = "pm_mid" in dataset.columns and dataset["pm_mid"].notna().sum() > 100
     if not has_pm:
@@ -878,8 +879,8 @@ st.title("Binary Option Pricing Dashboard")
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Model")
-    model_name = st.selectbox("Select model", list(MODEL_REGISTRY.keys()), index=list(MODEL_REGISTRY.keys()).index("gaussian"))
+    st.header("Adaptive-t Model")
+    model_name = "gaussian_t"
     model = get_model(model_name)
 
     # Load cached params
@@ -887,7 +888,9 @@ with st.sidebar:
     has_params = cached_params is not None
 
     if has_params:
-        st.success(f"Calibrated: LL={cached_params['log_loss']:.4f} ({cached_params['improvement_pct']:+.1f}%)")
+        neg_t_ll = cached_params.get("neg_t_ll", 0)
+        nu_med = cached_params.get("nu_median", 0)
+        st.success(f"Calibrated: neg_t_LL={neg_t_ll:.3f}, nu_med={nu_med:.1f}")
     else:
         st.warning("Not calibrated yet")
 
@@ -907,8 +910,12 @@ with st.sidebar:
                 else:
                     st.error("No cached 1s data. Cannot build dataset.")
                     st.stop()
-        with st.spinner(f"Calibrating {model_name}..."):
-            result = calibrate(model, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
+        with st.spinner("Stage 1: Calibrating volatility (QLIKE)..."):
+            model_gauss = get_model("gaussian")
+            calibrate_vol(model_gauss, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
+        with st.spinner("Stage 2: Calibrating tails (Student-t LL)..."):
+            model_t = get_model("gaussian_t")
+            calibrate_tail(model_t, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
             st.rerun()
 
     st.divider()
@@ -941,9 +948,9 @@ with st.sidebar:
         calibrated = {k: cached_params[k] for k in model.param_names() if k in cached_params}
         bounds = model.param_bounds()
 
-        # Initialize session state on first load or model change
-        if st.session_state.get("_last_model") != model_name:
-            st.session_state["_last_model"] = model_name
+        # Initialize session state on first load
+        if not st.session_state.get("_params_initialized"):
+            st.session_state["_params_initialized"] = True
             for pname in model.param_names():
                 st.session_state[f"p_{pname}"] = calibrated.get(pname, model.initial_params()[pname])
 
@@ -989,7 +996,9 @@ with st.sidebar:
                 feats_ds = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
                 p_ds = model.predict(slider_params, S_ds, K_ds, tau_ds, feats_ds)
                 ll_slider = log_loss(y_ds, p_ds)
-                ll_cal = cached_params["log_loss"]
+                # Compare against calibrated params
+                p_cal = model.predict(calibrated, S_ds, K_ds, tau_ds, feats_ds)
+                ll_cal = log_loss(y_ds, p_cal)
                 st.metric("Dataset LL", f"{ll_slider:.4f}", delta=f"{ll_slider - ll_cal:+.4f}", delta_color="inverse")
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1016,7 @@ if view_mode == "Calibration":
         if dataset.empty:
             st.warning("No cached dataset. Click **Calibrate** to build one.")
         else:
-            render_calibration_view(model, active_params, dataset, cached_params)
+            render_calibration_view(model, active_params, dataset)
 
 elif view_mode == "Model vs PM":
     if not has_params:
@@ -1017,11 +1026,11 @@ elif view_mode == "Model vs PM":
         if dataset.empty:
             st.warning("No cached dataset. Click **Calibrate** to build one.")
         else:
-            render_model_vs_pm_view(model, active_params, dataset, cached_params)
+            render_model_vs_pm_view(model, active_params, dataset)
 
 elif view_mode == "Single Market":
     if active_params is None:
-        st.info("No parameters available. Click **Calibrate** first, or switch to a calibrated model.")
+        st.info("No parameters available. Click **Calibrate** first.")
     elif selected_date is None:
         st.warning("No dates available for the selected asset.")
     else:
