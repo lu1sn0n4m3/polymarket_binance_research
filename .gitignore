@@ -210,4 +210,5 @@ outputs/
 
 #Data
 pricer_calibration/output/
+pricing/output/
 /data/
