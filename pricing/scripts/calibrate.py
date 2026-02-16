@@ -1,9 +1,9 @@
 """One-click model calibration.
 
 Usage:
-    python -m pricing.scripts.calibrate --model probit_gaussian
+    python -m pricing.scripts.calibrate --model gaussian
     python -m pricing.scripts.calibrate --model simple_gaussian --start 2026-01-19 --end 2026-01-30
-    python -m pricing.scripts.calibrate --model probit_gaussian --rebuild
+    python -m pricing.scripts.calibrate --model gaussian --rebuild
 """
 
 import argparse
@@ -17,7 +17,7 @@ import pandas as pd
 # Registry of built-in models (name -> module path, class name)
 MODEL_REGISTRY = {
     "simple_gaussian": ("pricing.models.simple_gaussian", "SimpleGaussianModel"),
-    "probit_gaussian": ("pricing.models.probit_gaussian", "ProbitGaussianModel"),
+    "gaussian": ("pricing.models.gaussian", "GaussianModel"),
 }
 
 
@@ -44,10 +44,10 @@ def main():
     parser = argparse.ArgumentParser(description="Calibrate a pricing model")
     parser.add_argument("--model", type=str, required=True,
                         help=f"Model name ({', '.join(MODEL_REGISTRY)}) or module.ClassName")
-    parser.add_argument("--start", type=str, default="2026-01-19",
-                        help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default="2026-01-30",
-                        help="End date (YYYY-MM-DD)")
+    parser.add_argument("--start", type=str, default=None,
+                        help="Start date (YYYY-MM-DD). Default: earliest cached date")
+    parser.add_argument("--end", type=str, default=None,
+                        help="End date (YYYY-MM-DD). Default: latest cached date")
     parser.add_argument("--asset", type=str, default="BTC",
                         help="Asset (BTC or ETH)")
     parser.add_argument("--rebuild", action="store_true",
@@ -83,9 +83,25 @@ def main():
         dataset = pd.read_parquet(dataset_path)
         print(f"  {len(dataset):,} calibration samples")
     else:
+        # Auto-detect date range from cache if not specified
+        start = args.start
+        end = args.end
+        if start is None or end is None:
+            from src.data import get_cache_status
+            status = get_cache_status("binance", args.asset, "1s")
+            available = status.get("available_dates", [])
+            if not available:
+                print("No cached 1s data found. Specify --start and --end manually.")
+                return
+            if start is None:
+                start = available[0]
+            if end is None:
+                end = available[-1]
+            print(f"\nAuto-detected date range: {start} to {end} ({len(available)} days cached)")
+
         cfg = DatasetConfig(
-            start_date=date.fromisoformat(args.start),
-            end_date=date.fromisoformat(args.end),
+            start_date=date.fromisoformat(start),
+            end_date=date.fromisoformat(end),
             asset=args.asset,
             sample_interval_sec=args.sample_interval,
             output_dir=args.output_dir,

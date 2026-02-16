@@ -93,6 +93,11 @@ def compute_seasonal_vol(
     ts = bbo[ts_col].values
     mid = bbo[mid_col].values
 
+    # Filter NaN mid values (occur at day boundaries before first quote)
+    valid_mask = ~np.isnan(mid)
+    ts = ts[valid_mask]
+    mid = mid[valid_mask]
+
     # Find where mid actually changed (filter duplicate ticks)
     changed = np.zeros(len(mid), dtype=bool)
     changed[0] = True

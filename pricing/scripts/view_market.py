@@ -1,7 +1,7 @@
 """Visualize model predictions on a single hourly market.
 
 Usage:
-    python -m pricing.scripts.view_market --model probit_gaussian --date 2026-01-19 --hour 14
+    python -m pricing.scripts.view_market --model gaussian --date 2026-01-19 --hour 14
     python -m pricing.scripts.view_market --model simple_gaussian --date 2026-01-20 --hour 9 --save
 """
 

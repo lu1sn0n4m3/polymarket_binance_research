@@ -168,6 +168,14 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
             })
 
     dataset = pd.DataFrame(rows)
+
+    # Drop rows with NaN or inf in any feature column
+    feature_cols = ["S", "K", "sigma_tod", "sigma_rv", "sigma_rel"]
+    n_before = len(dataset)
+    dataset = dataset.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_cols)
+    n_dropped = n_before - len(dataset)
+    if n_dropped > 0:
+        print(f"  Dropped {n_dropped} rows with NaN/inf features")
     print(f"  {len(dataset):,} calibration rows from {labels.shape[0]} markets")
 
     # Save
