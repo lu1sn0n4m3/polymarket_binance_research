@@ -31,6 +31,7 @@ sys.path.insert(0, str(project_root))
 from pricing.models import get_model, Model, CalibrationResult
 from pricing.calibrate import calibrate_vol, calibrate_tail, log_loss
 from pricing.dataset import build_dataset, DatasetConfig
+from pricing.diagnostics import variance_ratio_diagnostics
 from pricing.features.seasonal_vol import compute_seasonal_vol
 from pricing.features.realized_vol import compute_rv_ewma
 from src.data import (
@@ -136,7 +137,7 @@ def load_cached_params(model_name: str) -> dict | None:
 @st.cache_data(ttl=300)
 def load_single_market_data(
     asset: str, market_date: str, hour_et: int,
-    ewma_half_life_sec: float = 300.0,
+    ewma_half_life_sec: float = 60.0,
 ):
     """Load and prepare all data for a single market view.
 
@@ -407,10 +408,65 @@ def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame):
     )
     st.plotly_chart(fig, width="stretch")
 
+    # E(u|X) conditional bias diagnostics (paper Section 3)
+    with st.expander("E[u|X] Variance Diagnostics (paper Section 3)"):
+        _render_eu_diagnostics(model, params, dataset)
+
     # Conditional reliability
     if sigma_rel is not None:
         with st.expander("Conditional Reliability (τ × σ_rel)"):
             _render_conditional_reliability(p_pred, y, tau_min, sigma_rel)
+
+
+def _render_eu_diagnostics(model: Model, params: dict, dataset: pd.DataFrame):
+    """Render E[u|X] conditional bias diagnostics (paper Section 3)."""
+    S = dataset["S"].values.astype(np.float64)
+    K = dataset["K"].values.astype(np.float64)
+    tau = dataset["tau"].values.astype(np.float64)
+    feats = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
+
+    var_pred = model.predict_variance(params, S, K, tau, feats)
+    eu_results = variance_ratio_diagnostics(dataset, var_pred, n_bins=10, verbose=False)
+
+    S_T = dataset["S_T"].values.astype(np.float64)
+    u = np.log(S_T / S) ** 2 / np.maximum(var_pred, 1e-20)
+    st.metric("E[u] (global)", f"{np.mean(u):.4f}", delta=f"{np.mean(u) - 1.0:+.4f}", delta_color="off")
+
+    var_names = {"tau": "tau (min)", "sigma_rel": "sigma_rel", "tsm": "time_since_move (s)", "hour_et": "Hour (ET)"}
+    available = [k for k in ["tau", "sigma_rel", "tsm", "hour_et"] if k in eu_results]
+    n_vars = len(available)
+
+    if n_vars == 0:
+        st.info("No state variables available for diagnostics.")
+        return
+
+    fig = make_subplots(
+        rows=1, cols=n_vars,
+        subplot_titles=[var_names.get(v, v) for v in available],
+        horizontal_spacing=0.08,
+    )
+
+    for ci, var_name in enumerate(available):
+        bins = eu_results[var_name]
+        x_vals = [b["mean_x"] for b in bins]
+        y_vals = [b["mean_u"] for b in bins]
+        se_vals = [1.96 * b["se_u"] for b in bins]
+
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=y_vals,
+            error_y=dict(type="data", array=se_vals, visible=True),
+            mode="markers+lines", marker=dict(size=6, color=COLORS["model"]),
+            showlegend=False,
+        ), row=1, col=ci + 1)
+        fig.add_hline(y=1.0, line_dash="dash", line_color="black", line_width=1, row=1, col=ci + 1)
+        fig.update_yaxes(title_text="E[u | X]" if ci == 0 else "", range=[0.5, 1.5], row=1, col=ci + 1)
+
+    fig.update_layout(
+        height=350,
+        margin=dict(l=50, r=30, t=40, b=40),
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption("u = r² / v̂. Target: E[u|X] = 1 for all X. Bars show 95% CI (clustered at market level).")
 
 
 # ---------------------------------------------------------------------------

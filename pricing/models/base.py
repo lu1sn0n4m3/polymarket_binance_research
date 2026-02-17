@@ -95,6 +95,22 @@ class Model(ABC):
         """
         raise NotImplementedError(f"{self.name} does not implement predict_variance()")
 
+    def qlike_gradient(
+        self,
+        params: dict[str, float],
+        S: np.ndarray,
+        K: np.ndarray,
+        tau: np.ndarray,
+        features: dict[str, np.ndarray],
+        log_return_sq: np.ndarray,
+    ) -> dict[str, np.ndarray] | None:
+        """Analytic gradient of per-observation QLIKE w.r.t. each param.
+
+        Returns dict[param_name -> array of shape (N,)] or None if not implemented.
+        Models that don't implement this get numerical gradients in calibrate_vol().
+        """
+        return None
+
     def required_features(self) -> list[str]:
         """Feature columns this model needs from the dataset.
 

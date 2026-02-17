@@ -34,7 +34,7 @@ class DatasetConfig:
     tod_bucket_minutes: int = 5
     tod_smoothing_window: int = 3
     sigma_tod_floor: float = 1e-10
-    ewma_half_life_sec: float = 300.0
+    ewma_half_life_sec: float = 60.0
     start_hour: int = 0
     end_hour: int = 23
     output_dir: str = "pricing/output"

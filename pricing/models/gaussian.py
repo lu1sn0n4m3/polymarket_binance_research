@@ -13,7 +13,7 @@ from scipy.stats import norm
 
 from pricing.models.base import Model
 
-KAPPA = 30.0  # staleness saturation time (seconds), fixed
+KAPPA = 600.0  # staleness saturation time (seconds), fixed
 
 
 class GaussianModel(Model):
@@ -47,6 +47,35 @@ class GaussianModel(Model):
              * np.power(np.maximum(tau, 1e-6), alpha)
              * gamma)
         return v
+
+    def qlike_gradient(self, params, S, K, tau, features, log_return_sq):
+        """Analytic QLIKE gradient (paper eqs 33-36).
+
+        dL_Q/d(theta_j) = (1 - r^2/v) / v * dv/d(theta_j)
+
+        where:
+            dv/dc   = 2v/c
+            dv/dbeta = 2v * ln(sigma_rel)
+            dv/dalpha = v * ln(tau)
+            dv/dlam  = v / Gamma(tsm) * (1 - exp(-tsm/kappa))
+        """
+        v = self.predict_variance(params, S, K, tau, features)
+        v = np.maximum(v, 1e-20)
+
+        common = (1.0 - log_return_sq / v) / v
+
+        c = params["c"]
+        lam = params["lam"]
+        sigma_rel = features["sigma_rel"]
+        tsm = features["time_since_move"]
+        gamma = self._gamma(tsm, lam)
+
+        return {
+            "c": common * (2.0 * v / c),
+            "beta": common * (2.0 * v * np.log(np.maximum(sigma_rel, 1e-12))),
+            "alpha": common * (v * np.log(np.maximum(tau, 1e-6))),
+            "lam": common * (v / gamma * (1.0 - np.exp(-tsm / KAPPA))),
+        }
 
     def param_names(self):
         return ["c", "beta", "alpha", "lam"]

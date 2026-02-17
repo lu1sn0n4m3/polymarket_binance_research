@@ -1,18 +1,13 @@
-"""Gaussian volatility + adaptive Student-t tails.
+"""Fixed-nu Student-t model (paper Section 6).
 
 Two-stage model:
-  Stage 1 (frozen): variance from QLIKE calibration (paper eq 4)
+  Stage 1 (frozen): variance from QLIKE calibration (paper eq 9)
     v = c^2 * sigma_tod^2 * sigma_rel^{2*beta} * tau^alpha * Gamma(tsm)
 
-  Stage 2 (fitted): state-dependent degrees-of-freedom
-    eta = b0 + b_stale * log1p(time_since_move) + b_sess * session_bump + b_tau * log1p(tau)
-    nu  = nu_min + (nu_max - nu_min) * sigmoid(eta)
+  Stage 2 (fitted): single scalar nu, calibrated via MLE on z-residuals
+    p = T_nu(-k / (s(nu) * sqrt(v)))
 
-  Variance-preserving scale so changing nu doesn't distort the vol forecast:
-    scale = sqrt((nu - 2) / nu)
-    p = T_nu(-k / (scale * sqrt(v)))
-
-5 free parameters: b0, b_stale, b_sess, b_tau, nu_max.
+1 free parameter: nu.
 """
 
 import json
@@ -24,12 +19,12 @@ from scipy.stats import t as student_t
 from pricing.models.base import Model
 from pricing.models.gaussian import KAPPA
 
-NU_MIN = 3.0  # hard floor -- ensures variance exists
+NU_MIN = 3.0
 
 
-class GaussianTModel(Model):
+class FixedTModel(Model):
 
-    name = "gaussian_t"
+    name = "fixed_t"
 
     def __init__(self, vol_params_path: str | Path = "pricing/output/gaussian_vol_params.json"):
         """Load frozen variance parameters from QLIKE calibration."""
@@ -62,33 +57,10 @@ class GaussianTModel(Model):
                 * np.power(np.maximum(tau, 1e-6), self.alpha)
                 * gamma)
 
-    def _nu(self, params, tau, features):
-        """Compute state-dependent degrees-of-freedom."""
-        b0 = params["b0"]
-        b_stale = params["b_stale"]
-        b_sess = params["b_sess"]
-        b_tau = params["b_tau"]
-        nu_max = params["nu_max"]
-
-        hour = np.asarray(features["hour_et"], dtype=np.float64)
-        bump_06 = np.exp(-((hour - 6.0) ** 2) / (2.0 * 1.5 ** 2))
-        bump_20 = np.exp(-((hour - 20.0) ** 2) / (2.0 * 1.5 ** 2))
-        sess = bump_06 + bump_20
-
-        eta = (b0
-               + b_stale * np.log1p(features["time_since_move"])
-               + b_sess * sess
-               + b_tau * np.log1p(tau))
-        nu = NU_MIN + (nu_max - NU_MIN) / (1.0 + np.exp(-eta))
-        return nu
-
     def predict(self, params, S, K, tau, features):
         v = self._variance(tau, features)
-        nu = self._nu(params, tau, features)
-
-        # Variance-preserving scale: Var(scale * T_nu) = 1.0
+        nu = params["nu"]
         scale = np.sqrt((nu - 2.0) / nu)
-
         k = np.log(K / S)
         p = student_t.cdf(-k / (scale * np.sqrt(np.maximum(v, 1e-20))), df=nu)
         return np.clip(p, 1e-9, 1.0 - 1e-9)
@@ -97,19 +69,13 @@ class GaussianTModel(Model):
         return self._variance(tau, features)
 
     def param_names(self):
-        return ["b0", "b_stale", "b_sess", "b_tau", "nu_max"]
+        return ["nu"]
 
     def initial_params(self):
-        return {"b0": 2.0, "b_stale": 0.0, "b_sess": 0.0, "b_tau": 0.0, "nu_max": 30.0}
+        return {"nu": 8.0}
 
     def param_bounds(self):
-        return {
-            "b0": (-5.0, 10.0),
-            "b_stale": (-2.0, 2.0),
-            "b_sess": (-5.0, 5.0),
-            "b_tau": (-2.0, 2.0),
-            "nu_max": (5.0, 100.0),
-        }
+        return {"nu": (3.01, 100.0)}
 
     def required_features(self):
-        return ["sigma_tod", "sigma_rel", "time_since_move", "hour_et"]
+        return ["sigma_tod", "sigma_rel", "time_since_move"]
