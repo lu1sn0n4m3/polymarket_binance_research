@@ -175,11 +175,11 @@ def tail_diagnostics(
 
     if nu is not None:
         scale = np.sqrt((nu - 2.0) / nu)
-        adaptive_t = np.array([
+        student_t_exc = np.array([
             float(np.mean(2.0 * student_t_dist.sf(c / scale, df=nu)))
             for c in thresholds
         ])
-        result["student_t"] = adaptive_t
+        result["student_t"] = student_t_exc
 
     if verbose:
         print(f"\n  Tail exceedance P(|z| > c):")

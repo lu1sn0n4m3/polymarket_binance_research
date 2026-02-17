@@ -4,10 +4,9 @@ Stage 1 — Volatility (QLIKE):
     calibrate_vol() fits variance parameters (c, beta, alpha, lam) by minimizing
     the QLIKE scoring rule on realized variance. Uses the Gaussian model.
 
-Stage 2 — Tails (Student-t LL):
-    calibrate_tail() fits the tail parameters (b0, b_stale, b_sess, b_tau,
-    nu_max) by maximizing Student-t log-likelihood on the z-residuals from
-    stage 1. Uses the GaussianT model with frozen vol params.
+Stage 2 — Tails (Fixed-nu Student-t LL):
+    calibrate_tail_fixed() fits a single scalar nu by maximizing Student-t
+    log-likelihood on z-residuals from stage 1. Uses the FixedT model.
 """
 
 import json
@@ -215,139 +214,7 @@ def calibrate_vol(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Tail calibration (Student-t log-likelihood on z-residuals)
-# ---------------------------------------------------------------------------
-
-def calibrate_tail(
-    model,
-    dataset: pd.DataFrame,
-    market_weighted: bool = True,
-    method: str = "L-BFGS-B",
-    output_dir: str | Path | None = "pricing/output",
-    verbose: bool = True,
-) -> CalibrationResult:
-    """Stage 2: Fit tail parameters by maximizing Student-t log-likelihood.
-
-    Variance is frozen from stage 1. Only the b-params controlling
-    nu(state) and nu_max are fitted.
-
-    Args:
-        model: GaussianTModel instance (with frozen vol params).
-        dataset: DataFrame with S, K, tau, S_T, market_id + features.
-        market_weighted: If True, each market hour gets equal weight.
-        method: scipy.optimize.minimize method.
-        output_dir: Where to save params JSON.
-        verbose: Print diagnostics.
-    """
-    from scipy.special import gammaln
-
-    S = dataset["S"].values.astype(np.float64)
-    K = dataset["K"].values.astype(np.float64)
-    tau = dataset["tau"].values.astype(np.float64)
-    S_T = dataset["S_T"].values.astype(np.float64)
-    features = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
-    market_ids = dataset["market_id"].values if "market_id" in dataset.columns else None
-
-    v = model._variance(tau, features)
-    z = np.log(S_T / S) / np.sqrt(np.maximum(v, 1e-20))
-
-    names = model.param_names()
-    x0 = [model.initial_params()[n] for n in names]
-    bounds = [model.param_bounds()[n] for n in names]
-
-    def neg_t_ll(x):
-        params = dict(zip(names, x))
-        nu = model._nu(params, tau, features)
-        nu = np.maximum(nu, 3.0 + 1e-6)
-
-        scale = np.sqrt((nu - 2.0) / nu)
-        w = z / scale
-
-        ll_obs = (gammaln(0.5 * (nu + 1)) - gammaln(0.5 * nu)
-                  - 0.5 * np.log(nu * np.pi)
-                  - 0.5 * (nu + 1) * np.log(1.0 + w ** 2 / nu)
-                  - np.log(scale))
-
-        if market_weighted and market_ids is not None:
-            return -_market_weighted_mean(ll_obs, market_ids)
-        return -float(np.mean(ll_obs))
-
-    if verbose:
-        print(f"\n[Stage 2] Calibrating {model.name} [tail/student-t LL] "
-              f"({len(names)} params, {len(S):,} samples) ...")
-
-    res = minimize(neg_t_ll, x0, method=method, bounds=bounds)
-    fitted = dict(zip(names, [float(v) for v in res.x]))
-    model.set_params(fitted)
-
-    obj_final = res.fun
-    n_markets = dataset["market_id"].nunique() if "market_id" in dataset.columns else 0
-
-    nu = model._nu(fitted, tau, features)
-
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"STAGE 2 — TAIL CALIBRATION: {model.name}")
-        print(f"{'='*60}")
-        print(f"\n  Parameters:")
-        for n in names:
-            print(f"    {n:10s} = {fitted[n]:+.6f}")
-        print(f"\n  Neg t-LL: {obj_final:.6f}")
-        print(f"  Samples: {len(S):,}  Markets: {n_markets}")
-
-        print(f"\n  nu distribution:")
-        print(f"    mean={np.mean(nu):.2f}  median={np.median(nu):.2f}  "
-              f"min={np.min(nu):.2f}  max={np.max(nu):.2f}")
-
-        # Tail exceedance diagnostics with t-model comparison
-        tail_diagnostics(z, nu=nu, verbose=True)
-
-        y = dataset["y"].values.astype(np.float64) if "y" in dataset.columns else None
-        if y is not None:
-            p_pred = model.predict(fitted, S, K, tau, features)
-            ll_t = log_loss(y, p_pred)
-            ll_baseline = log_loss(y, np.full_like(y, y.mean()))
-            imp = (ll_baseline - ll_t) / ll_baseline * 100
-            print(f"\n  Binary LL: {ll_t:.6f}  (baseline: {ll_baseline:.6f}, {imp:+.1f}%)")
-
-        if market_ids is not None:
-            _print_clustered_se_tail(fitted, names, z, tau, features, market_ids, model)
-
-    result = CalibrationResult(
-        model_name=model.name,
-        params=fitted,
-        log_loss=obj_final,
-        log_loss_baseline=0.0,
-        improvement_pct=0.0,
-        n_samples=len(S),
-        n_markets=n_markets,
-        metadata={"objective": "student_t_ll", "neg_t_ll": obj_final},
-    )
-
-    if output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        params_path = output_dir / f"{model.name}_params.json"
-        params_out = {
-            "model": model.name,
-            "objective": "student_t_ll",
-            **fitted,
-            "neg_t_ll": obj_final,
-            "n_samples": len(S),
-            "n_markets": n_markets,
-            "nu_mean": float(np.mean(nu)),
-            "nu_median": float(np.median(nu)),
-        }
-        with open(params_path, "w") as f:
-            json.dump(params_out, f, indent=2)
-        if verbose:
-            print(f"\n  Saved params to {params_path}")
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Stage 2 (fixed-nu): Scalar nu calibration via Brent's method
+# Stage 2: Fixed-nu tail calibration via Brent's method
 # ---------------------------------------------------------------------------
 
 def calibrate_tail_fixed(
@@ -457,45 +324,3 @@ def calibrate_tail_fixed(
     return result
 
 
-def _print_clustered_se_tail(fitted, names, z, tau, features, market_ids, model):
-    """Print clustered standard errors for tail params via finite differences."""
-    from scipy.special import gammaln
-
-    unique = np.unique(market_ids)
-    n_clusters = len(unique)
-
-    eps = 1e-4
-    grad_per_market = np.zeros((n_clusters, len(names)))
-
-    for j, name in enumerate(names):
-        params_plus = fitted.copy()
-        params_minus = fitted.copy()
-        params_plus[name] = fitted[name] + eps
-        params_minus[name] = fitted[name] - eps
-
-        nu_p = model._nu(params_plus, tau, features)
-        nu_m = model._nu(params_minus, tau, features)
-
-        for which, nu_val in [(0, nu_p), (1, nu_m)]:
-            nu_val = np.maximum(nu_val, 3.0 + 1e-6)
-            scale = np.sqrt((nu_val - 2.0) / nu_val)
-            w = z / scale
-            ll_obs = (gammaln(0.5 * (nu_val + 1)) - gammaln(0.5 * nu_val)
-                      - 0.5 * np.log(nu_val * np.pi)
-                      - 0.5 * (nu_val + 1) * np.log(1.0 + w ** 2 / nu_val)
-                      - np.log(scale))
-            for ci, m in enumerate(unique):
-                mask = market_ids == m
-                val = np.mean(ll_obs[mask])
-                if which == 0:
-                    grad_per_market[ci, j] = val
-                else:
-                    grad_per_market[ci, j] = (grad_per_market[ci, j] - val) / (2 * eps)
-
-    se = np.std(grad_per_market, axis=0, ddof=1) / np.sqrt(n_clusters)
-
-    print(f"\n  Clustered SE (n_clusters={n_clusters}):")
-    for j, name in enumerate(names):
-        t_stat = fitted[name] / max(se[j], 1e-12)
-        sig = "***" if abs(t_stat) > 2.58 else "**" if abs(t_stat) > 1.96 else "*" if abs(t_stat) > 1.64 else ""
-        print(f"    {name:10s} = {fitted[name]:+.4f} +/- {se[j]:.4f}  t={t_stat:+.2f} {sig}")

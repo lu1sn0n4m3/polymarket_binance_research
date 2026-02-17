@@ -29,7 +29,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from pricing.models import get_model, Model, CalibrationResult
-from pricing.calibrate import calibrate_vol, calibrate_tail, log_loss
+from pricing.calibrate import calibrate_vol, calibrate_tail_fixed, log_loss
 from pricing.dataset import build_dataset, DatasetConfig
 from pricing.diagnostics import variance_ratio_diagnostics
 from pricing.features.seasonal_vol import compute_seasonal_vol
@@ -935,8 +935,8 @@ st.title("Binary Option Pricing Dashboard")
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Adaptive-t Model")
-    model_name = "gaussian_t"
+    st.header("Fixed-t Model")
+    model_name = "fixed_t"
     model = get_model(model_name)
 
     # Load cached params
@@ -945,8 +945,8 @@ with st.sidebar:
 
     if has_params:
         neg_t_ll = cached_params.get("neg_t_ll", 0)
-        nu_med = cached_params.get("nu_median", 0)
-        st.success(f"Calibrated: neg_t_LL={neg_t_ll:.3f}, nu_med={nu_med:.1f}")
+        nu = cached_params.get("nu", 0)
+        st.success(f"Calibrated: neg_t_LL={neg_t_ll:.3f}, nu={nu:.1f}")
     else:
         st.warning("Not calibrated yet")
 
@@ -969,9 +969,9 @@ with st.sidebar:
         with st.spinner("Stage 1: Calibrating volatility (QLIKE)..."):
             model_gauss = get_model("gaussian")
             calibrate_vol(model_gauss, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
-        with st.spinner("Stage 2: Calibrating tails (Student-t LL)..."):
-            model_t = get_model("gaussian_t")
-            calibrate_tail(model_t, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
+        with st.spinner("Stage 2: Calibrating tails (fixed-nu MLE)..."):
+            model_t = get_model("fixed_t")
+            calibrate_tail_fixed(model_t, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
             st.rerun()
 
     st.divider()

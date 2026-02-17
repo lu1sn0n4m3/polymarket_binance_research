@@ -58,17 +58,12 @@ class Pricer:
             vp = json.load(f)
         vol_params = {k: vp[k] for k in ["c", "beta", "alpha", "lam"]}
 
-        # Tail params: prefer fixed_t, fall back to gaussian_t median nu
+        # Tail params
         fixed_path = output_dir / "fixed_t_params.json"
-        adaptive_path = output_dir / "gaussian_t_params.json"
         if fixed_path.exists():
             with open(fixed_path) as f:
                 tp = json.load(f)
             nu = tp["nu"]
-        elif adaptive_path.exists():
-            with open(adaptive_path) as f:
-                tp = json.load(f)
-            nu = tp.get("nu_median", 8.0)
         else:
             nu = 30.0  # near-Gaussian default
 

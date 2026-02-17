@@ -5,8 +5,7 @@ from pricing.models.base import Model, CalibrationResult
 # Registry of built-in models: name -> (module_path, class_name)
 MODEL_REGISTRY = {
     "gaussian": ("pricing.models.gaussian", "GaussianModel"),
-"fixed_t": ("pricing.models.fixed_t", "FixedTModel"),
-    "gaussian_t": ("pricing.models.gaussian_t", "GaussianTModel"),
+    "fixed_t": ("pricing.models.fixed_t", "FixedTModel"),
 }
 
 
