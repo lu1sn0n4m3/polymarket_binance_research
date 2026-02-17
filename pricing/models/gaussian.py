@@ -1,10 +1,11 @@
-"""Gaussian model with effective volatility.
+"""Gaussian model with variance-first decomposition (paper eq 4).
 
-    sigma_eff = (a0 + a1 * sqrt(tau_min)) * sigma_tod * sigma_rel^beta
-    z = (ln(K/S) + 0.5 * sigma_eff^2 * tau) / (sigma_eff * sqrt(tau))
-    p = Phi(-z)   [= P(S_T > K) under GBM with zero drift]
+    v_t(tau; theta) = c^2 * sigma_tod^2 * sigma_rel^{2*beta} * tau^alpha * Gamma(tsm)
+    Gamma(tsm) = 1 + lam * (1 - exp(-tsm / kappa))
 
-3 parameters: a0, a1, beta.
+    p = Phi(-k / sqrt(v))   where k = ln(K/S)
+
+4 parameters: c, beta, alpha, lam.  kappa is fixed.
 """
 
 import numpy as np
@@ -12,51 +13,54 @@ from scipy.stats import norm
 
 from pricing.models.base import Model
 
+KAPPA = 30.0  # staleness saturation time (seconds), fixed
+
 
 class GaussianModel(Model):
 
     name = "gaussian"
 
+    def _gamma(self, tsm, lam):
+        """Staleness adjustment Gamma(tsm) = 1 + lam * (1 - exp(-tsm/kappa))."""
+        return 1.0 + lam * (1.0 - np.exp(-tsm / KAPPA))
+
     def predict(self, params, S, K, tau, features):
-        a0 = params["a0"]
-        a1 = params["a1"]
-        beta = params["beta"]
-        sigma_tod = features["sigma_tod"]
-        sigma_rv = features["sigma_rv"]
-        sigma_rel = features["sigma_rel"]
-
-        tau_min = tau / 60.0
-        a_tau = a0 + a1 * np.sqrt(np.maximum(tau_min, 0))
-        sigma_eff = a_tau * sigma_tod * np.power(np.maximum(sigma_rel, 1e-12), beta)
-
-        sqrt_tau = np.sqrt(np.maximum(tau, 1e-6))
-        z = (np.log(K / S) + 0.5 * sigma_eff ** 2 * tau) / (sigma_eff * sqrt_tau)
-
-        p = norm.cdf(-z)
+        v = self.predict_variance(params, S, K, tau, features)
+        k = np.log(K / S)
+        p = norm.cdf(-k / np.sqrt(np.maximum(v, 1e-20)))
         return np.clip(p, 1e-9, 1.0 - 1e-9)
 
     def predict_variance(self, params, S, K, tau, features):
-        a0 = params["a0"]
-        a1 = params["a1"]
+        c = params["c"]
         beta = params["beta"]
-        tau_min = tau / 60.0
-        a_tau = a0 + a1 * np.sqrt(np.maximum(tau_min, 0))
-        sigma_eff = a_tau * features["sigma_tod"] * np.power(
-            np.maximum(features["sigma_rel"], 1e-12), beta)
-        return sigma_eff ** 2 * tau
+        alpha = params["alpha"]
+        lam = params["lam"]
+
+        sigma_tod = features["sigma_tod"]
+        sigma_rel = features["sigma_rel"]
+        tsm = features["time_since_move"]
+
+        gamma = self._gamma(tsm, lam)
+        v = (c ** 2
+             * sigma_tod ** 2
+             * np.power(np.maximum(sigma_rel, 1e-12), 2 * beta)
+             * np.power(np.maximum(tau, 1e-6), alpha)
+             * gamma)
+        return v
 
     def param_names(self):
-        return ["a0", "a1", "beta"]
+        return ["c", "beta", "alpha", "lam"]
 
     def initial_params(self):
-        return {"a0": 0.5, "a1": 0.05, "beta": 0.5}
+        return {"c": 1.0, "beta": 0.5, "alpha": 1.0, "lam": 0.0}
 
     def param_bounds(self):
         return {
-            "a0": (0.1, 3.0),
-            "a1": (-0.5, 0.5),
+            "c": (0.1, 3.0),
             "beta": (0.0, 2.0),
+            "alpha": (0.5, 1.5),
+            "lam": (0.0, 2.0),
         }
 
     def required_features(self):
-        return ["sigma_tod", "sigma_rv", "sigma_rel"]
+        return ["sigma_tod", "sigma_rel", "time_since_move"]

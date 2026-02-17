@@ -1,0 +1,236 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
+
+% --- Custom commands ---
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\sigEff}{\sigma_{\mathrm{eff}}}
+
+\title{\textbf{Variance-First Binary Pricing with a Robust Fixed-$t$ Tail Overlay}}
+\author{}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We specify a two-stage model for hourly binary option probabilities in cryptocurrency markets. Stage~1 forecasts
+the conditional second moment (integrated variance over the remaining horizon) using a proper scoring rule (QLIKE),
+yielding an ``honest'' variance forecast $v_t(\tau) \approx \E[r_{t,T}^2 \mid \F_t]$ for the terminal log-return
+$r_{t,T} = \ln(S_T/S_t)$. Stage~2 optionally overlays a one-parameter Student-$t$ innovation with a
+variance-preserving scale, improving tail coverage without changing the Stage~1 variance forecast.
+We provide a mathematically explicit bias-diagnostics procedure based on conditional calibration of
+$u := r_{t,T}^2 / v_t(\tau)$ via $\E[u \mid X]\approx 1$ for low-dimensional state variables $X$ observable at quote time,
+and we describe how this model is monitored and used in automated market making.
+\end{abstract}
+
+\section{Pricing Target and Return Representation}
+
+Let $S_t$ denote the current mid-price, $K$ the contract strike (hour open), and $T$ the expiry time.
+Define remaining time $\tau := T-t$ (seconds) and the terminal log-return
+\begin{equation}
+    r_{t,T} := \ln\!\left(\frac{S_T}{S_t}\right).
+\end{equation}
+Binary pricing requires the conditional probability
+\begin{equation}
+    p_t := \Prob(S_T > K \mid \F_t)
+    = \Prob\!\left(r_{t,T} > k_t \mid \F_t\right),
+    \qquad k_t := \ln\!\left(\frac{K}{S_t}\right).
+    \label{eq:p_def}
+\end{equation}
+
+We represent $r_{t,T}$ using a \emph{variance-first} decomposition:
+\begin{equation}
+    r_{t,T} = \sqrt{v_t(\tau)}\,\varepsilon_t,
+    \qquad v_t(\tau) := \sigEff(t,\tau)^2\,\tau,
+    \label{eq:variance_decomp}
+\end{equation}
+where $v_t(\tau)$ is the model's forecast of the conditional second moment of $r_{t,T}$ and $\varepsilon_t$
+is a standardized innovation. The design principle is to fit $v_t(\tau)$ using a variance-targeted
+proper scoring rule, and only then choose a (possibly heavy-tailed) distribution for $\varepsilon_t$.
+This avoids objective misalignment in which a downstream binary loss can be improved by distorting variance.
+
+\section{Stage 1: Conditional Variance Model}
+
+\subsection{Model specification}
+
+Let $b_t$ denote the current time-of-day bucket (e.g.\ 5-minute bins). Let $\sigma_{\mathrm{tod}}(b_t)$
+be a robust seasonal volatility curve estimated from tick-time realized variance, and let $\sigma_{\mathrm{rv}}(t)$
+be a real-time regime estimator (e.g.\ EWMA of tick-time realized variance). Define relative regime level
+\begin{equation}
+    \sigma_{\mathrm{rel}}(t) := \frac{\sigma_{\mathrm{rv}}(t)}{\sigma_{\mathrm{tod}}(b_t)}.
+\end{equation}
+
+We forecast the horizon-$\tau$ conditional variance using a parsimonious multiplicative form:
+\begin{equation}
+    v_t(\tau;\theta) =
+    c^2 \,
+    \sigma_{\mathrm{tod}}(b_t)^2 \,
+    \sigma_{\mathrm{rel}}(t)^{2\beta}\,
+    \tau^{\alpha}\,
+    \Gamma(\mathrm{tsm}_t),
+    \label{eq:v_model}
+\end{equation}
+with parameters $\theta = (c,\beta,\alpha,\lambda)$ and optional microstructure adjustment
+\begin{equation}
+    \Gamma(\mathrm{tsm}) :=
+    1 + \lambda\left(1-e^{-\mathrm{tsm}/\kappa}\right),
+    \qquad \lambda \ge 0,
+    \label{eq:stale_adj}
+\end{equation}
+where $\mathrm{tsm}_t$ is the time since the last mid-price change (seconds).
+The constant $\kappa>0$ controls how quickly the adjustment activates; in practice $\kappa$ may be fixed
+to an intuitive value (e.g.\ 30--60\,s) to avoid adding degrees of freedom.
+
+\paragraph{Interpretation.}
+The parameter $c$ sets the overall variance scale, $\beta$ controls responsiveness to volatility regime
+deviations relative to time-of-day norms, and $\alpha$ controls horizon scaling. In the diffusion benchmark
+with integrated variance proportional to $\tau$, one expects $\alpha \approx 1$; deviations of $\alpha$ from 1
+correct systematic horizon mis-scaling with a single exponent. The factor $\Gamma(\mathrm{tsm})$ prevents
+unrealistically small variance forecasts during stale periods where high-frequency realized variance can collapse
+even though hour-ahead terminal variance remains supported by discrete jump risk.
+
+\subsection{Calibration objective: QLIKE and ``honest'' variance}
+
+Given calibration observations $i=1,\dots,N$ with realized returns $r_i$ and horizons $\tau_i$, define
+the model variance forecast $\hat v_i := v_{t_i}(\tau_i;\theta)$. We estimate $\theta$ by minimizing
+the QLIKE scoring rule:
+\begin{equation}
+    \mathrm{QLIKE}(\theta)
+    := \frac{1}{N}\sum_{i=1}^{N}\left[\ln(\hat v_i) + \frac{r_i^2}{\hat v_i}\right].
+    \label{eq:qlike}
+\end{equation}
+QLIKE is a \emph{proper scoring rule for conditional variance}: under mild regularity conditions, the conditional
+expectation of the summand is uniquely minimized when
+\begin{equation}
+    \hat v_i = \E[r_i^2 \mid \F_{t_i}],
+    \label{eq:qlike_proper}
+\end{equation}
+meaning that minimizing QLIKE elicits an ``honest'' forecast of the conditional second moment rather than a variance
+distorted to improve some downstream task. This property is the justification for Stage~1 decoupling: the model is
+explicitly engineered so that the fitted $v_t(\tau)$ is a faithful variance forecast.
+
+\section{Stage 1 Diagnostics: Conditional Bias via $\E(u \mid X)$}
+
+Define the normalized squared return (variance ratio)
+\begin{equation}
+    u_i := \frac{r_i^2}{\hat v_i}.
+    \label{eq:u_def}
+\end{equation}
+If Stage~1 is correctly calibrated, then for any information set $\F_{t_i}$,
+\begin{equation}
+    \E[u_i \mid \F_{t_i}] = 1.
+    \label{eq:u_conditional}
+\end{equation}
+Since $\F_{t_i}$ is high-dimensional, we test low-dimensional conditional moments by selecting a small set of
+state variables $X_i$ observable at quote time (examples below) and checking
+\begin{equation}
+    \E[u_i \mid X_i] \approx 1.
+    \label{eq:u_given_X}
+\end{equation}
+
+\paragraph{Recommended diagnostic states $X$.}
+A robust diagnostic set spans the primary sources of conditional variance structure without encouraging feature bloat:
+\begin{itemize}[nosep]
+    \item Horizon: $\tau$ (or coarse $\tau$ buckets) to detect mis-scaling in $\tau^\alpha$.
+    \item Time-of-day: $b_t$ to detect residual seasonality or smoothing errors in $\sigma_{\mathrm{tod}}$.
+    \item Regime: $\sigma_{\mathrm{rel}}$ (or $\ln\sigma_{\mathrm{rel}}$) to detect mis-responsiveness in $\beta$ or filter half-life.
+    \item Microstructure: $\mathrm{tsm}$ to detect stale-tape underforecasting addressed by $\Gamma(\mathrm{tsm})$.
+\end{itemize}
+
+\paragraph{How to estimate $\E(u \mid X)$ in practice.}
+For scalar $X$ (e.g.\ $\tau$ or $\ln\sigma_{\mathrm{rel}}$), we form equal-mass bins and compute within-bin means
+$\bar u(B) = \frac{1}{|B|}\sum_{i\in B} u_i$, with confidence intervals clustered at the market/hour level.
+Alternatively, one may regress $u_i$ on a low-order basis $\phi(X_i)$ (e.g.\ piecewise constant or spline) and test
+whether fitted values deviate from 1.
+
+\paragraph{Minimal correction logic.}
+If $\E[u\mid \tau]$ drifts with $\tau$, adjust $\alpha$ (single horizon exponent) rather than adding multiple $\tau$ terms.
+If $\E[u\mid b_t]$ deviates by time-of-day, re-estimate / smooth $\sigma_{\mathrm{tod}}$ more robustly rather than adding
+calendar interactions. If $\E[u\mid \sigma_{\mathrm{rel}}]$ slopes, adjust regime filter speed and/or $\beta$ rather than
+introducing additional regime features. If $\E[u\mid \mathrm{tsm}]$ rises in stale periods, include the saturating uplift
+$\Gamma(\mathrm{tsm})$ with as few parameters as possible (often fixing $\kappa$ and fitting only $\lambda$).
+The guiding rule is that each diagnostic failure is addressed by a \emph{structural} one-knob adjustment rather than a
+high-dimensional ex-post patch.
+
+\section{Stage 2 (Optional): One-Parameter Heavy-Tail Overlay}
+
+\subsection{Variance-preserving Student-$t$ innovations}
+
+Stage~1 targets the conditional second moment. Stage~2 changes only the innovation \emph{shape} while preserving
+$\Var(\varepsilon_t)=1$ so that the Stage~1 variance forecast remains valid. Let $X_\nu \sim t_\nu$ be a standard
+Student-$t$ random variable with $\nu>2$ degrees of freedom, for which $\Var(X_\nu)=\nu/(\nu-2)$. Define the
+variance-preserving scale
+\begin{equation}
+    s(\nu) := \sqrt{\frac{\nu-2}{\nu}},
+    \qquad \varepsilon_t := s(\nu)\,X_\nu,
+    \label{eq:var_preserve_scale}
+\end{equation}
+so that $\Var(\varepsilon_t)=1$ for all $\nu>2$. This implies that changing $\nu$ cannot re-scale variance; it only
+changes tail thickness (kurtosis). The parameter $\nu$ is estimated by maximizing the Student-$t$ likelihood of the
+standardized residuals
+\begin{equation}
+    z_i := \frac{r_i}{\sqrt{\hat v_i}},
+    \label{eq:z_def}
+\end{equation}
+with $\hat v_i$ fixed from Stage~1.
+
+\subsection{Binary probability formula}
+
+Under Gaussian innovations $\varepsilon_t \sim \mathcal{N}(0,1)$, \eqref{eq:variance_decomp} implies
+\begin{equation}
+    p_t = \Phi\!\left(-\frac{k_t}{\sqrt{v_t(\tau)}}\right),
+    \qquad k_t=\ln\!\left(\frac{K}{S_t}\right).
+    \label{eq:p_gauss}
+\end{equation}
+Under the fixed-$t$ overlay \eqref{eq:var_preserve_scale}, the probability becomes
+\begin{equation}
+    p_t = T_\nu\!\left(-\frac{k_t}{s(\nu)\sqrt{v_t(\tau)}}\right),
+    \label{eq:p_t}
+\end{equation}
+where $T_\nu$ is the CDF of the standard Student-$t$ distribution.
+
+\paragraph{Justification.}
+Stage~1 ensures $v_t(\tau)\approx \E[r_{t,T}^2\mid \F_t]$. Stage~2 improves tail coverage by selecting a heavy-tailed
+innovation family for $z=r/\sqrt{v}$. The variance-preserving scale is essential: it guarantees that the heavy-tail
+overlay does not undo the QLIKE-optimal variance calibration.
+
+\section{Deployment: Automated Market Making and Monitoring}
+
+In live operation, the system recomputes the state variables and forecasts at each quote update:
+\begin{equation}
+    \sigma_{\mathrm{tod}}(b_t),\ \sigma_{\mathrm{rv}}(t),\ \sigma_{\mathrm{rel}}(t),\ \mathrm{tsm}_t,\ \tau
+    \quad\Rightarrow\quad v_t(\tau)\quad\Rightarrow\quad p_t.
+\end{equation}
+A market maker uses $p_t$ to derive a fair value for the binary contract (ignoring fees and inventory) and then quotes
+bid/ask around it with a spread determined by risk appetite and execution costs. The model supports trader oversight
+through a small set of interpretable monitors:
+\begin{itemize}[nosep]
+    \item \textbf{Scale monitor:} rolling estimates of $\bar u=\E[u]$ and $\E[u\mid X]$ across $(\tau,b_t,\sigma_{\mathrm{rel}},\mathrm{tsm})$.
+    \item \textbf{Tail monitor (if using $t$):} rolling exceedance rates $\Prob(|z|>q)$ versus Student-$t$ predictions for fixed thresholds $q$.
+    \item \textbf{Override knobs:} $(\beta,\lambda,\nu)$ provide intuitive emergency adjustments: regime responsiveness, stale-tape uplift, and tail thickness.
+\end{itemize}
+Because the model is built from proper scoring rules and variance-preserving shape overlays, these overrides have
+predictable effects: changing $(c,\beta,\alpha,\lambda)$ changes the conditional variance forecast, while changing $\nu$
+changes only tail probabilities at fixed variance.
+
+\end{document}

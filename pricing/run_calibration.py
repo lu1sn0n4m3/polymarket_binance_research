@@ -19,7 +19,7 @@ from pricing.models import get_model
 # =====================================================================
 # Build dataset
 # =====================================================================
-cfg = DatasetConfig(start_date=date(2026, 1, 19), end_date=date(2026, 1, 30))
+cfg = DatasetConfig(start_date=date(2026, 1, 19), end_date=date(2026, 2, 15))
 dataset = build_dataset(cfg)
 
 if dataset.empty:
