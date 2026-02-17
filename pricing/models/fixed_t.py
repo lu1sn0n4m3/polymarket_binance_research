@@ -1,8 +1,8 @@
-"""Fixed-nu Student-t model (paper Section 6).
+"""Fixed-nu Student-t model.
 
 Two-stage model:
-  Stage 1 (frozen): variance from QLIKE calibration (paper eq 9)
-    v = c^2 * sigma_tod^2 * sigma_rel^{2*beta} * tau^alpha * Gamma(tsm)
+  Stage 1 (frozen): variance from QLIKE calibration
+    v = c^2 * sigma_tod^2 * sigma_rel^{2*beta} * tau^alpha
 
   Stage 2 (fitted): single scalar nu, calibrated via MLE on z-residuals
     p = T_nu(-k / (s(nu) * sqrt(v)))
@@ -17,7 +17,6 @@ import numpy as np
 from scipy.stats import t as student_t
 
 from pricing.models.base import Model
-from pricing.models.gaussian import KAPPA
 
 NU_MIN = 3.0
 
@@ -39,23 +38,15 @@ class FixedTModel(Model):
         self.c = vp["c"]
         self.beta = vp["beta"]
         self.alpha = vp["alpha"]
-        self.lam = vp["lam"]
-
-    def _gamma(self, tsm):
-        """Staleness adjustment Gamma(tsm) = 1 + lam * (1 - exp(-tsm/kappa))."""
-        return 1.0 + self.lam * (1.0 - np.exp(-tsm / KAPPA))
 
     def _variance(self, tau, features):
         """Compute frozen variance v_t(tau) from Stage 1 params."""
         sigma_tod = features["sigma_tod"]
         sigma_rel = features["sigma_rel"]
-        tsm = features["time_since_move"]
-        gamma = self._gamma(tsm)
         return (self.c ** 2
                 * sigma_tod ** 2
                 * np.power(np.maximum(sigma_rel, 1e-12), 2 * self.beta)
-                * np.power(np.maximum(tau, 1e-6), self.alpha)
-                * gamma)
+                * np.power(np.maximum(tau, 1e-6), self.alpha))
 
     def predict(self, params, S, K, tau, features):
         v = self._variance(tau, features)
@@ -78,4 +69,4 @@ class FixedTModel(Model):
         return {"nu": (3.01, 100.0)}
 
     def required_features(self):
-        return ["sigma_tod", "sigma_rel", "time_since_move"]
+        return ["sigma_tod", "sigma_rel"]

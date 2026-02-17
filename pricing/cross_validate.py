@@ -31,7 +31,6 @@ def _make_fixed_t(vol_params):
     m.c = vol_params["c"]
     m.beta = vol_params["beta"]
     m.alpha = vol_params["alpha"]
-    m.lam = vol_params["lam"]
     return m
 
 
@@ -188,7 +187,7 @@ def run_cv():
     print(f"{'='*70}")
 
     print(f"\n  Vol params (Stage 1):")
-    for k in ["c", "beta", "alpha", "lam"]:
+    for k in ["c", "beta", "alpha"]:
         vals = np.array(vol_params_history[k])
         print(f"    {k:6s}: mean={np.mean(vals):+.4f}  std={np.std(vals):.4f}  "
               f"range=[{np.min(vals):+.4f}, {np.max(vals):+.4f}]  "

@@ -53,13 +53,14 @@
 \begin{abstract}
 We provide a complete mathematical specification for a two-stage binary option pricing model applicable to
 high-frequency cryptocurrency markets. The model decomposes the pricing problem into (i) honest conditional
-variance forecasting via the QLIKE proper scoring rule and (ii) an optional variance-preserving Student-$t$
-tail overlay that improves tail coverage without distorting the variance forecast. We state all assumptions
-explicitly, prove the key properties (QLIKE properness, variance preservation under the $t$-overlay, and
-the decoupling guarantee), develop a rigorous diagnostic framework based on conditional calibration of
-normalized squared returns, and specify the complete pricer construction from raw tick data to real-time
-probability output. The document is self-contained and purely theoretical; empirical results are
-reported separately.
+variance forecasting via the QLIKE proper scoring rule and (ii) a variance-preserving Student-$t$
+tail overlay that improves tail coverage without distorting the variance forecast. The final model
+has four parameters: three for the variance model ($c$, $\beta$, $\alpha$) and one for the tail shape
+($\nu$). We state all assumptions explicitly, prove the key properties (QLIKE properness, variance
+preservation under the $t$-overlay, and the decoupling guarantee), develop a rigorous diagnostic
+framework based on conditional calibration of normalized squared returns, and specify the complete
+pricer construction from raw tick data to real-time probability output. The document is self-contained
+and purely theoretical; empirical results are reported separately.
 \end{abstract}
 
 \tableofcontents

@@ -1,7 +1,7 @@
 """Two-stage calibration: volatility (QLIKE) + tails (fixed-nu Student-t LL).
 
 Paper workflow:
-  Stage 1:  QLIKE -> (c, beta, alpha, lam)
+  Stage 1:  QLIKE -> (c, beta, alpha)
   Stage 2:  Fixed-nu MLE -> nu  (paper Section 6)
 
 Usage:
@@ -174,7 +174,7 @@ stats = [
      f"{(ll_baseline-ll_gauss)/ll_baseline*100:+.1f}%",
      f"{(ll_baseline-ll_fixed)/ll_baseline*100:+.1f}%"],
     ["", "", ""],
-    ["Vol params", "c,beta,alpha,lam", "(frozen)"],
+    ["Vol params", "c,beta,alpha", "(frozen)"],
     ["Tail params", "(none)", f"nu={nu:.1f}"],
     ["", "", ""],
     ["std(z)", f"{np.std(z):.4f}", ""],

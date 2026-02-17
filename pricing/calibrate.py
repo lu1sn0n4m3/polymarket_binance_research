@@ -1,7 +1,7 @@
 """Two-stage calibration pipeline for the variance-first binary option pricer.
 
 Stage 1 — Volatility (QLIKE):
-    calibrate_vol() fits variance parameters (c, beta, alpha, lam) by minimizing
+    calibrate_vol() fits variance parameters (c, beta, alpha) by minimizing
     the QLIKE scoring rule on realized variance. Uses the Gaussian model.
 
 Stage 2 — Tails (Fixed-nu Student-t LL):
