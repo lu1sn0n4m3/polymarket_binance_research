@@ -10,7 +10,7 @@ Pipeline:
 """
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -138,12 +138,55 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     # Build market_id from labels
     sample_step_ms = int(cfg.sample_interval_sec * 1000)
 
-    # Polymarket loader (optional — graceful if unavailable)
+    # Step 4b: Pre-load Polymarket data (single load for full date range)
+    pm_lookup = {}  # hour_start_ms -> (ts_array, mid_array)
     try:
-        from src.data import load_polymarket_market
+        from src.data.resampled_polymarket import load_resampled_polymarket
         _has_pm = True
     except ImportError:
         _has_pm = False
+
+    if _has_pm:
+        print("Pre-loading Polymarket data ...")
+        try:
+            pm_all = load_resampled_polymarket(
+                start_dt=start_dt, end_dt=end_dt,
+                interval_ms=1000, asset=cfg.asset,
+            )
+        except Exception:
+            pm_all = pd.DataFrame()
+
+        if not pm_all.empty:
+            pm_ts = pm_all["ts_recv"].values
+            pm_bid = pm_all["bid"].values
+            pm_ask = pm_all["ask"].values
+            pm_mid = pm_all["mid"].values
+
+            for _, lbl in labels.iterrows():
+                hs = int(lbl["hour_start_ms"])
+                he = int(lbl["hour_end_ms"])
+
+                hour_mask = (pm_ts >= hs) & (pm_ts < he)
+                if not hour_mask.any():
+                    continue
+
+                h_mid = pm_mid[hour_mask]
+                h_bid = pm_bid[hour_mask]
+                h_ask = pm_ask[hour_mask]
+
+                # Normalize to Up probability (replicates easy_api._normalize_to_up)
+                terminal_mid = (h_bid[-1] + h_ask[-1]) / 2
+                Y_lbl = int(lbl["Y"])
+                token_is_up = (terminal_mid > 0.5) if Y_lbl == 1 else (terminal_mid <= 0.5)
+
+                if token_is_up:
+                    pm_lookup[hs] = (pm_ts[hour_mask], h_mid.astype(np.float64))
+                else:
+                    pm_lookup[hs] = (pm_ts[hour_mask], (1.0 - h_mid).astype(np.float64))
+
+            del pm_all
+
+        print(f"  {len(pm_lookup)} markets pre-loaded")
 
     rows = []
     pm_hit, pm_miss = 0, 0
@@ -166,26 +209,13 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
         if len(indices) == 0:
             continue
 
-        # Load Polymarket data for this hour (UTC → ET conversion)
+        # Look up pre-loaded Polymarket data
         pm_ts_arr, pm_mid_arr = None, None
-        if _has_pm:
-            try:
-                et_dt = dt_start.astimezone(_ET)
-                pm = load_polymarket_market(
-                    cfg.asset, et_dt.strftime("%Y-%m-%d"), et_dt.hour, "1s",
-                )
-                if not pm.empty:
-                    pm_in = (pm["ts_recv"].values >= hour_start_ms) & (pm["ts_recv"].values < hour_end_ms)
-                    if pm_in.sum() > 0:
-                        pm_ts_arr = pm["ts_recv"].values[pm_in]
-                        pm_mid_arr = pm["mid"].values[pm_in].astype(np.float64)
-                        pm_hit += 1
-                    else:
-                        pm_miss += 1
-                else:
-                    pm_miss += 1
-            except Exception:
-                pm_miss += 1
+        if hour_start_ms in pm_lookup:
+            pm_ts_arr, pm_mid_arr = pm_lookup[hour_start_ms]
+            pm_hit += 1
+        elif _has_pm:
+            pm_miss += 1
 
         # Subsample at sample_interval_sec spacing
         first_ts = ts_bbo[indices[0]]
