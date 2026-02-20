@@ -1,4 +1,4 @@
-"""Generate publication-quality figures for the fixed-t whitepaper.
+"""Generate publication-quality figures for the Gaussian pricer paper.
 
 Usage:
     python pricing/paper/generate_figures.py
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-from scipy.stats import norm, t as student_t
+from scipy.stats import norm
 
 from pricing.models import get_model
 
@@ -30,10 +30,10 @@ DATA_DIR = Path("pricing/output")
 DPI = 300
 
 # Colors
-C_T = "#2563eb"       # fixed-t (blue)
-C_GAUSS = "#94a3b8"   # Gaussian (gray)
-C_EMP = "#dc2626"     # empirical (red)
-C_ACCENT = "#f59e0b"  # accent (amber)
+C_MODEL = "#2563eb"     # model (blue)
+C_GAUSS = "#94a3b8"     # Gaussian reference (gray)
+C_EMP = "#dc2626"       # empirical (red)
+C_ACCENT = "#f59e0b"    # accent (amber)
 C_GREEN = "#16a34a"
 
 # Publication style
@@ -58,16 +58,13 @@ plt.rcParams.update({
 # ---------------------------------------------------------------------------
 print("Loading data...")
 dataset = pd.read_parquet(DATA_DIR / "calibration_dataset.parquet")
-seasonal_df = pd.read_parquet(DATA_DIR / "seasonal_vol.parquet")
+seasonal_df = pd.read_parquet(DATA_DIR / "seasonal_vol_weekday.parquet")
 
 with open(DATA_DIR / "gaussian_vol_params.json") as f:
     vol_params = json.load(f)
-with open(DATA_DIR / "fixed_t_params.json") as f:
-    tail_params = json.load(f)
 
-# Models
+# Model
 model_gauss = get_model("gaussian")
-model_t = get_model("fixed_t")
 
 # Arrays
 S = dataset["S"].values.astype(np.float64)
@@ -75,21 +72,17 @@ K = dataset["K"].values.astype(np.float64)
 tau = dataset["tau"].values.astype(np.float64)
 S_T = dataset["S_T"].values.astype(np.float64)
 y = dataset["y"].values.astype(np.float64)
-features = {f: dataset[f].values.astype(np.float64) for f in model_t.required_features()}
+features = {f: dataset[f].values.astype(np.float64) for f in model_gauss.required_features()}
 tau_min = tau / 60.0
 
 # Params
 gauss_params = {k: vol_params[k] for k in model_gauss.param_names()}
-t_params = {k: tail_params[k] for k in model_t.param_names()}
-nu = t_params["nu"]
-scale = np.sqrt((nu - 2.0) / nu)
 
 # Predictions
 p_gauss = np.clip(model_gauss.predict(gauss_params, S, K, tau, features), 1e-9, 1 - 1e-9)
-p_t = np.clip(model_t.predict(t_params, S, K, tau, features), 1e-9, 1 - 1e-9)
 
 # Residuals
-v_pred = model_t._variance(tau, features)
+v_pred = model_gauss.predict_variance(gauss_params, S, K, tau, features)
 z = np.log(S_T / S) / np.sqrt(np.maximum(v_pred, 1e-20))
 
 # Log loss
@@ -99,12 +92,10 @@ def log_loss(y, p):
 
 ll_baseline = log_loss(y, np.full_like(y, y.mean()))
 ll_gauss = log_loss(y, p_gauss)
-ll_t = log_loss(y, p_t)
 
 print(f"  Baseline LL: {ll_baseline:.4f}")
 print(f"  Gaussian LL: {ll_gauss:.4f}")
-print(f"  Fixed-t LL: {ll_t:.4f}")
-print(f"  {len(dataset):,} rows, nu: {nu:.2f}")
+print(f"  {len(dataset):,} rows")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +107,7 @@ buckets = seasonal_df["bucket"].values
 sigma_tod = seasonal_df["sigma_tod"].values
 hours = buckets * 5 / 60  # 5-minute buckets -> hours
 
-ax.plot(hours, sigma_tod * 1e4, color=C_T, lw=1.5)
+ax.plot(hours, sigma_tod * 1e4, color=C_MODEL, lw=1.5)
 ax.set_xlabel("Hour (UTC)")
 ax.set_ylabel(r"$\sigma_{\mathrm{tod}}$ ($\times 10^{-4}$ / $\sqrt{\mathrm{s}}$)")
 ax.set_title("Seasonal Volatility Curve")
@@ -141,11 +132,10 @@ plt.close()
 print("Figure 2: Model comparison...")
 fig, ax = plt.subplots(figsize=(5, 3.5))
 
-models = ["Baseline\n(constant)", "Gaussian\n(QLIKE)", f"Fixed-$t$\n($\\nu$={nu:.0f})"]
-lls = [ll_baseline, ll_gauss, ll_t]
-improvements = [0, (ll_baseline - ll_gauss) / ll_baseline * 100,
-                (ll_baseline - ll_t) / ll_baseline * 100]
-colors = [C_GAUSS, C_ACCENT, C_T]
+models = ["Baseline\n(constant)", "Gaussian\n(QLIKE)"]
+lls = [ll_baseline, ll_gauss]
+improvements = [0, (ll_baseline - ll_gauss) / ll_baseline * 100]
+colors = [C_GAUSS, C_MODEL]
 
 bars = ax.bar(models, lls, color=colors, width=0.55, edgecolor="white", linewidth=1.5)
 ax.set_ylabel("Binary Log-Loss")
@@ -178,7 +168,7 @@ for i in range(len(tau_edges) - 1):
     mask = (tau_min >= tau_edges[i]) & (tau_min < tau_edges[i + 1])
     ratios.append(np.mean(log_return_sq[mask]) / np.mean(v_pred[mask]))
 
-bars = ax.bar(tau_labels, ratios, color=C_T, width=0.55, alpha=0.85)
+bars = ax.bar(tau_labels, ratios, color=C_MODEL, width=0.55, alpha=0.85)
 ax.axhline(1.0, color="k", ls="--", lw=1)
 ax.set_xlabel(r"$\tau$ bucket (minutes)")
 ax.set_ylabel("Variance Ratio (realized / predicted)")
@@ -195,7 +185,7 @@ plt.close()
 
 
 # ---------------------------------------------------------------------------
-# Figure 4: QQ Plot
+# Figure 4: QQ Plot (Gaussian only)
 # ---------------------------------------------------------------------------
 print("Figure 4: QQ plot...")
 fig, ax = plt.subplots(figsize=(4.5, 4.5))
@@ -207,18 +197,13 @@ probs = np.linspace(0.5 / n, 1 - 0.5 / n, n)
 # Gaussian quantiles
 gauss_q = norm.ppf(probs)
 
-# Student-t quantiles (variance-preserving scale)
-t_q = student_t.ppf(probs, df=nu) * scale
-
 step = max(1, n // 1500)
-ax.scatter(gauss_q[::step], z_sorted[::step], s=3, alpha=0.3, color=C_GAUSS,
+ax.scatter(gauss_q[::step], z_sorted[::step], s=3, alpha=0.3, color=C_MODEL,
            label="Gaussian", rasterized=True)
-ax.scatter(t_q[::step], z_sorted[::step], s=3, alpha=0.3, color=C_T,
-           label=f"$t(\\nu={nu:.0f})$", rasterized=True)
 
 lim = 5.5
 ax.plot([-lim, lim], [-lim, lim], "k--", lw=0.8)
-ax.set_xlabel("Theoretical quantiles")
+ax.set_xlabel("Theoretical quantiles (Gaussian)")
 ax.set_ylabel("Empirical quantiles ($z$)")
 ax.set_title("QQ Plot")
 ax.set_xlim(-lim, lim)
@@ -231,7 +216,7 @@ plt.close()
 
 
 # ---------------------------------------------------------------------------
-# Figure 5: Tail Coverage
+# Figure 5: Tail Coverage (Gaussian only)
 # ---------------------------------------------------------------------------
 print("Figure 5: Tail coverage...")
 fig, ax = plt.subplots(figsize=(5.5, 3.5))
@@ -239,10 +224,8 @@ fig, ax = plt.subplots(figsize=(5.5, 3.5))
 thresholds = np.linspace(0.5, 4.5, 80)
 tail_empirical = [np.mean(np.abs(z) > c) * 100 for c in thresholds]
 tail_gauss = [(1 - norm.cdf(c) + norm.cdf(-c)) * 100 for c in thresholds]
-tail_fixed = [2.0 * student_t.sf(c / scale, df=nu) * 100 for c in thresholds]
 
 ax.semilogy(thresholds, tail_empirical, color=C_EMP, lw=2, label="Empirical")
-ax.semilogy(thresholds, tail_fixed, color=C_T, lw=2, label=f"Fixed-$t$ ($\\nu$={nu:.0f})")
 ax.semilogy(thresholds, tail_gauss, color=C_GAUSS, lw=2, ls="--", label="Gaussian")
 
 ax.set_xlabel("Threshold $c$")
@@ -256,54 +239,47 @@ plt.close()
 
 
 # ---------------------------------------------------------------------------
-# Figure 6: Calibration Curve
+# Figure 6: Calibration Curve (Gaussian only)
 # ---------------------------------------------------------------------------
 print("Figure 6: Calibration curve...")
-fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+fig, ax = plt.subplots(figsize=(5, 5))
 
-for idx, (p_pred, label, color) in enumerate([
-    (p_t, f"Fixed-$t$ ($\\nu$={nu:.0f})", C_T),
-    (p_gauss, "Gaussian (QLIKE)", C_GAUSS),
-]):
-    ax = axes[idx]
-    ax.plot([0, 1], [0, 1], "k--", lw=0.8)
+ax.plot([0, 1], [0, 1], "k--", lw=0.8)
 
-    # Equal-mass bins
-    n_bins = 20
-    order = np.argsort(p_pred)
-    p_sorted = p_pred[order]
-    y_sorted = y[order]
-    bin_size = len(p_pred) // n_bins
+# Equal-mass bins
+n_bins = 20
+order = np.argsort(p_gauss)
+p_sorted = p_gauss[order]
+y_sorted = y[order]
+bin_size = len(p_gauss) // n_bins
 
-    bp, ba, bse = [], [], []
-    for b in range(n_bins):
-        lo = b * bin_size
-        hi = (b + 1) * bin_size if b < n_bins - 1 else len(p_pred)
-        n = hi - lo
-        p_mean = np.mean(p_sorted[lo:hi])
-        y_mean = np.mean(y_sorted[lo:hi])
-        se = np.sqrt(y_mean * (1 - y_mean) / n) if n > 1 else 0
-        bp.append(p_mean)
-        ba.append(y_mean)
-        bse.append(se)
+bp, ba, bse = [], [], []
+for b in range(n_bins):
+    lo = b * bin_size
+    hi = (b + 1) * bin_size if b < n_bins - 1 else len(p_gauss)
+    n = hi - lo
+    p_mean = np.mean(p_sorted[lo:hi])
+    y_mean = np.mean(y_sorted[lo:hi])
+    se = np.sqrt(y_mean * (1 - y_mean) / n) if n > 1 else 0
+    bp.append(p_mean)
+    ba.append(y_mean)
+    bse.append(se)
 
-    bp, ba, bse = np.array(bp), np.array(ba), np.array(bse)
+bp, ba, bse = np.array(bp), np.array(ba), np.array(bse)
 
-    ax.fill_between(bp, ba - 1.96 * bse, ba + 1.96 * bse, alpha=0.2, color=color)
-    ax.plot(bp, ba, "o-", color=color, markersize=5, lw=1.5)
+ax.fill_between(bp, ba - 1.96 * bse, ba + 1.96 * bse, alpha=0.2, color=C_MODEL)
+ax.plot(bp, ba, "o-", color=C_MODEL, markersize=5, lw=1.5)
 
-    ll = log_loss(y, p_pred)
-    imp = (ll_baseline - ll) / ll_baseline * 100
+imp = (ll_baseline - ll_gauss) / ll_baseline * 100
 
-    ax.set_xlabel("Predicted $P(\\mathrm{Up})$")
-    ax.set_ylabel("Observed frequency")
-    ax.set_title(f"{label}\nLL = {ll:.4f} ($-${imp:.1f}\\%)")
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(-0.02, 1.02)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
+ax.set_xlabel("Predicted $P(\\mathrm{Up})$")
+ax.set_ylabel("Observed frequency")
+ax.set_title(f"Gaussian (QLIKE)\nLL = {ll_gauss:.4f} ($-${imp:.1f}\\%)")
+ax.set_xlim(-0.02, 1.02)
+ax.set_ylim(-0.02, 1.02)
+ax.set_aspect("equal")
+ax.grid(True, alpha=0.15)
 
-plt.tight_layout()
 fig.savefig(OUTPUT_DIR / "fig_calibration_curve.png")
 plt.close()
 

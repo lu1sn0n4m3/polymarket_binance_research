@@ -29,7 +29,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from pricing.models import get_model, Model, CalibrationResult
-from pricing.calibrate import calibrate_vol, calibrate_tail_fixed, log_loss
+from pricing.calibrate import calibrate_vol, log_loss
 from pricing.dataset import build_dataset, DatasetConfig
 from pricing.diagnostics import variance_ratio_diagnostics
 from pricing.features.seasonal_vol import compute_seasonal_vol
@@ -116,14 +116,7 @@ def equal_mass_reliability(p_pred: np.ndarray, y: np.ndarray, n_bins: int = 20):
 
 
 def _inject_vol_params(model, all_params):
-    """For fixed_t: inject vol params into model, return predict-only params.
-    For gaussian: no-op, return all_params unchanged."""
-    if hasattr(model, 'c'):  # fixed_t stores vol params as attrs
-        model.c = all_params["c"]
-        model.alpha = all_params["alpha"]
-        model.k0 = all_params["k0"]
-        model.k1 = all_params["k1"]
-        return {"nu": all_params["nu"]}
+    """Pass through params for gaussian model."""
     return all_params
 
 
@@ -300,37 +293,14 @@ def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame):
     improvement = (ll_baseline - ll) / ll_baseline * 100
     n_markets = dataset["market_id"].nunique() if "market_id" in dataset.columns else 0
 
-    # Metrics — adapt layout to model type
-    if model.name == "fixed_t":
-        # Gaussian comparison (same variance, normal CDF instead of t)
-        var_pred = model.predict_variance(params, S, K, tau, feats)
-        k_log = np.log(K / S)
-        sqrt_v = np.sqrt(np.maximum(var_pred, 1e-20))
-        p_gauss = np.clip(norm.cdf(-k_log / sqrt_v), 1e-9, 1 - 1e-9)
-        ll_gauss = log_loss(y, p_gauss)
-        imp_gauss = (ll_baseline - ll_gauss) / ll_baseline * 100
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Fixed-t LL", f"{ll:.4f}", delta=f"{improvement:+.1f}% vs base")
-        c2.metric("Gaussian LL", f"{ll_gauss:.4f}", delta=f"{imp_gauss:+.1f}% vs base")
-        c3.metric("t vs Gauss", f"{ll - ll_gauss:+.4f}",
-                  delta="t helps" if ll < ll_gauss else "Gauss wins",
-                  delta_color="normal" if ll < ll_gauss else "inverse")
-        c4.metric("Baseline", f"{ll_baseline:.4f}")
-        c5.metric("Samples", f"{len(y):,} / {n_markets} mkts")
-    else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Log Loss", f"{ll:.4f}", delta=f"{improvement:+.1f}% vs base")
-        c2.metric("Baseline", f"{ll_baseline:.4f}")
-        c3.metric("Samples", f"{len(y):,} / {n_markets} mkts")
+    # Metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Log Loss", f"{ll:.4f}", delta=f"{improvement:+.1f}% vs base")
+    c2.metric("Baseline", f"{ll_baseline:.4f}")
+    c3.metric("Samples", f"{len(y):,} / {n_markets} mkts")
 
     with st.expander("Fitted parameters"):
-        display = dict(params)
-        # For fixed_t, vol params live on model object, not in params dict
-        for attr in ["c", "alpha", "k0", "k1"]:
-            if attr not in display and hasattr(model, attr):
-                display[attr] = getattr(model, attr)
-        ordered = {k: display[k] for k in ["c", "alpha", "k0", "k1", "nu"] if k in display}
+        ordered = {k: params[k] for k in ["c", "alpha", "k0", "k1"] if k in params}
         param_df = pd.DataFrame({"Parameter": list(ordered.keys()), "Value": list(ordered.values())})
         st.dataframe(param_df, width="stretch", hide_index=True)
 
@@ -971,39 +941,21 @@ st.title("Binary Option Pricing Dashboard")
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Pricing Model")
-    model_name = st.radio(
-        "Distribution", ["gaussian", "fixed_t"],
-        format_func={"gaussian": "Gaussian (Phi)", "fixed_t": "Student-t (T_nu)"}.get,
-        horizontal=True,
-    )
 
-    # Load calibrated params from both stages
-    vol_raw = load_cached_params("gaussian_vol")
-    tail_raw = load_cached_params("fixed_t")
-    has_vol = vol_raw is not None
-    has_t = tail_raw is not None
-
-    # fixed_t needs vol params JSON to instantiate
-    if model_name == "fixed_t" and not has_vol:
-        st.warning("Run calibration first (need Stage 1 vol params).")
-        model_name = "gaussian"
-
+    model_name = "gaussian"
     model = get_model(model_name)
-    has_params = has_vol if model_name == "gaussian" else (has_vol and has_t)
+
+    # Load calibrated params
+    vol_raw = load_cached_params("gaussian_vol")
+    has_params = vol_raw is not None
 
     if has_params:
         calibrated_all = {
             "c": vol_raw["c"], "alpha": vol_raw["alpha"],
             "k0": vol_raw.get("k0", -100.0), "k1": vol_raw.get("k1", 0.0),
         }
-        if model_name == "fixed_t":
-            calibrated_all["nu"] = tail_raw["nu"]
-
         c_val, a_val = calibrated_all["c"], calibrated_all["alpha"]
-        if model_name == "gaussian":
-            st.success(f"c={c_val:.3f}  alpha={a_val:.3f}  (4 params)")
-        else:
-            st.success(f"c={c_val:.3f}  alpha={a_val:.3f}  nu={calibrated_all['nu']:.2f}")
+        st.success(f"c={c_val:.3f}  alpha={a_val:.3f}  (4 params)")
     else:
         st.warning("Not calibrated yet")
 
@@ -1023,12 +975,9 @@ with st.sidebar:
                 else:
                     st.error("No cached 1s data. Cannot build dataset.")
                     st.stop()
-        with st.spinner("Stage 1: Calibrating volatility (QLIKE)..."):
+        with st.spinner("Calibrating volatility (QLIKE)..."):
             model_gauss = get_model("gaussian")
             calibrate_vol(model_gauss, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
-        with st.spinner("Stage 2: Calibrating tails (fixed-nu MLE)..."):
-            model_t = get_model("fixed_t")
-            calibrate_tail_fixed(model_t, dataset, output_dir=str(OUTPUT_DIR), verbose=False)
             st.rerun()
 
     st.divider()
@@ -1059,13 +1008,10 @@ with st.sidebar:
         st.subheader("Parameters")
 
         all_param_names = ["c", "alpha", "k0", "k1"]
-        if model_name == "fixed_t":
-            all_param_names.append("nu")
 
         all_bounds = {
             "c": (0.1, 3.0), "alpha": (0.5, 1.5),
             "k0": (-10.0, 5.0), "k1": (-3.0, 3.0),
-            "nu": (3.01, 100.0),
         }
 
         # Initialize missing slider state
@@ -1087,14 +1033,6 @@ with st.sidebar:
             slider_params[pname] = st.slider(
                 pname, min_value=float(lo), max_value=float(hi),
                 step=(hi - lo) / 500, format="%.4f", key=f"p_{pname}",
-            )
-
-        if model_name == "fixed_t":
-            st.caption("Tails (MLE)")
-            lo, hi = all_bounds["nu"]
-            slider_params["nu"] = st.slider(
-                "nu", min_value=float(lo), max_value=float(hi),
-                step=0.1, format="%.1f", key="p_nu",
             )
 
         params_changed = any(
@@ -1133,7 +1071,6 @@ with st.sidebar:
 # Main content
 # ---------------------------------------------------------------------------
 # Resolve all_params (slider values take priority over calibrated)
-# Then inject vol params for fixed_t, or pass through for gaussian
 if slider_params:
     all_params = slider_params
 elif has_params:

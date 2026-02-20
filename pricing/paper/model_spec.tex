@@ -41,7 +41,7 @@
 \newcommand{\sigRv}{\sigma_{\mathrm{rv}}}
 \newcommand{\sigRel}{\sigma_{\mathrm{rel}}}
 
-\title{\textbf{A Variance-First Framework for Binary Option Pricing\\under Heavy-Tailed Innovations}\\[0.5em]
+\title{\textbf{A Variance-First Framework for Binary Option Pricing\\under Gaussian Innovations}\\[0.5em]
 \large Model Specification and Theoretical Foundations}
 \author{}
 \date{February 2026}
@@ -51,15 +51,15 @@
 
 % ===================================================================
 \begin{abstract}
-We provide a complete mathematical specification for a two-stage binary option pricing model applicable to
-high-frequency cryptocurrency markets. The model decomposes the pricing problem into (i) honest conditional
-variance forecasting via the QLIKE proper scoring rule and (ii) a variance-preserving Student-$t$
-tail overlay that improves tail coverage without distorting the variance forecast. The final model
-has five parameters: four for the variance model ($c$, $\alpha$, $k_0$, $k_1$)
-and one for the tail shape ($\nu$). The variance model incorporates horizon-dependent shrinkage
+We provide a complete mathematical specification for a Gaussian binary option pricing model applicable to
+high-frequency cryptocurrency markets. The model targets honest conditional
+variance forecasting via the QLIKE proper scoring rule, then maps the variance forecast
+to binary probabilities through the Gaussian CDF. The model
+has four parameters ($c$, $\alpha$, $k_0$, $k_1$) controlling the conditional variance forecast,
+which incorporates horizon-dependent shrinkage
 toward the seasonal baseline, reverting the regime-responsiveness term at longer horizons where
-transient volatility deviations are less informative. We state all assumptions explicitly, prove the key properties (QLIKE properness,
-variance preservation under the $t$-overlay, and the decoupling guarantee), develop a rigorous
+transient volatility deviations are less informative. We state all assumptions explicitly, prove the key properties (QLIKE properness
+and honest variance forecasts), develop a rigorous
 diagnostic framework based on conditional calibration of normalized squared returns, and specify the
 complete pricer construction from raw tick data to real-time probability output. The document is self-contained
 and purely theoretical; empirical results are reported separately.
@@ -108,14 +108,11 @@ where $F_{r_{t,T} \mid \F_t}$ is the conditional CDF of $r_{t,T}$ given $\F_t$.
 
 \subsection{Design philosophy}
 
-To evaluate \eqref{eq:p_as_cdf}, one must specify the full conditional distribution of $r_{t,T}$. We decompose
-this problem into two independent sub-problems:
-\begin{enumerate}[nosep]
-    \item \textbf{Location and scale:} Forecast the conditional first and second moments of $r_{t,T}$.
-    \item \textbf{Shape:} Choose a parametric innovation distribution whose tails match the empirical residuals.
-\end{enumerate}
-The key design principle is that each sub-problem is calibrated with its own \emph{proper scoring rule}, ensuring
-that the solution to one sub-problem does not distort the other. We call this the \emph{variance-first} approach.
+To evaluate \eqref{eq:p_as_cdf}, one must specify the full conditional distribution of $r_{t,T}$.
+Under a Gaussian innovation assumption, this reduces to forecasting the conditional variance
+of $r_{t,T}$ (the conditional mean is negligible at short horizons).
+The key design principle is that the variance is calibrated with a \emph{proper scoring rule} (QLIKE),
+ensuring that the variance forecast is honest. We call this the \emph{variance-first} approach.
 
 
 % ===================================================================
@@ -168,15 +165,15 @@ Assumption~\ref{ass:scale_shape} is the central structural assumption. It assert
 distribution of $r_{t,T}$ factors into a scale component $\sqrt{v_t(\tau)}$ (which captures all the
 conditional variance dynamics) and a shape component $\varepsilon_t$ (which captures the standardized
 distributional form). This factorization is exact for any location-scale family and holds approximately
-for a much wider class of models. The assumption permits the two-stage calibration: Stage~1 targets
-$v_t(\tau)$ and Stage~2 targets the distribution of $\varepsilon_t$.
+for a much wider class of models. Under the Gaussian assumption $\varepsilon_t \sim \mathcal{N}(0,1)$,
+the calibration reduces to targeting $v_t(\tau)$ via QLIKE.
 \end{remark}
 
 \begin{assumption}[Stationarity of the innovation distribution]
 \label{ass:stationary_innovation}
-The conditional distribution of $\varepsilon_t$ given $\F_t$ is stationary over the calibration window,
-in the sense that its shape parameters (e.g.\ degrees of freedom $\nu$) are constant or depend only on
-slowly varying state variables.
+The conditional distribution of $\varepsilon_t$ given $\F_t$ is stationary over the calibration window.
+Under the Gaussian assumption, this is automatically satisfied since the standard normal distribution
+has no free shape parameters.
 \end{assumption}
 
 \begin{assumption}[QLIKE regularity]
@@ -191,7 +188,7 @@ The parametric family $\{v_t(\tau;\theta) : \theta \in \Theta\}$ satisfies:
 
 
 % ===================================================================
-\section{Stage 1: Conditional Variance Model}
+\section{Conditional Variance Model}
 \label{sec:stage1}
 
 \subsection{Variance-first decomposition}
@@ -462,7 +459,7 @@ where $\hat{\theta}$ is the QLIKE minimizer. We call this the \emph{honest varia
 \label{rem:why_not_logloss}
 Binary log-loss is a proper scoring rule for \emph{probabilities}, not for \emph{variances}. When
 variance parameters are fitted by minimizing binary log-loss, the optimizer can exploit the nonlinear
-map $v \mapsto p$ (through the Gaussian or Student-$t$ CDF) to improve probability predictions at the
+map $v \mapsto p$ (through the Gaussian CDF) to improve probability predictions at the
 cost of systematic variance bias. Concretely, the optimizer may inflate $v$ in regimes where $k_t \approx 0$
 (near at-the-money), because a wider distribution assigns probability closer to 0.5, which has low binary
 log-loss when the true probability is near 0.5. QLIKE prevents this by targeting variance directly.
@@ -484,7 +481,7 @@ This gives each market equal influence, regardless of the number of within-marke
 
 
 % ===================================================================
-\section{Stage 1 Diagnostics: Conditional Calibration}
+\section{Diagnostics: Conditional Calibration}
 \label{sec:diagnostics}
 
 \subsection{The normalized squared return}
@@ -564,7 +561,7 @@ is Gaussian), the decomposition \eqref{eq:decomp} gives:
 where we have used Assumption~\ref{ass:zero_drift} to set the mean to zero. The binary probability is then:
 \begin{equation}
     \boxed{
-    p_t^{\mathrm{Gauss}} = \Phi\!\left(-\frac{k_t}{\sqrt{v_t(\tau)}}\right)
+    p_t = \Phi\!\left(-\frac{k_t}{\sqrt{v_t(\tau)}}\right)
     = \Phi\!\left(-\frac{\ln(K/S_t)}{\sqrt{v_t(\tau;\theta)}}\right),
     }
     \label{eq:p_gauss}
@@ -586,267 +583,10 @@ and it is a desirable property for a contract that pays on $S_T > K$.
 
 
 % ===================================================================
-\section{Stage 2: Heavy-Tail Overlay via Student-$t$ Innovations}
-\label{sec:stage2}
-
-\subsection{Motivation}
-
-If the Gaussian assumption were correct, the standardized residuals
-\begin{equation}
-    z_i := \frac{r_i}{\sqrt{\hat{v}_i}}
-    \label{eq:z_resid}
-\end{equation}
-would be i.i.d.\ $\mathcal{N}(0,1)$. In practice, the empirical distribution of $z_i$ typically exhibits
-excess kurtosis (heavier tails than Gaussian), even after careful variance calibration. This motivates
-replacing the Gaussian innovation with a parametric family that can accommodate heavier tails.
-
-\subsection{The Student-$t$ distribution}
-
-\begin{definition}[Student-$t$ random variable]
-A random variable $X$ follows a (standard) Student-$t$ distribution with $\nu > 0$ degrees of freedom,
-written $X \sim t_\nu$, if its density is:
-\begin{equation}
-    f_\nu(x) = \frac{\Gamma\!\left(\frac{\nu+1}{2}\right)}{\sqrt{\nu\pi}\;\Gamma\!\left(\frac{\nu}{2}\right)}
-    \left(1 + \frac{x^2}{\nu}\right)^{-(\nu+1)/2}.
-    \label{eq:t_density}
-\end{equation}
-\end{definition}
-
-Key properties relevant to our application:
-\begin{itemize}[nosep]
-    \item \textbf{Mean:} $\E[X] = 0$ for $\nu > 1$.
-    \item \textbf{Variance:} $\Var(X) = \nu / (\nu - 2)$ for $\nu > 2$. Note: $\Var(X) > 1$ for all finite $\nu > 2$.
-    \item \textbf{Kurtosis:} $\mathrm{Kurt}(X) = 3 + 6/(\nu - 4)$ for $\nu > 4$. Always exceeds the Gaussian
-        value of 3.
-    \item \textbf{Tail decay:} $f_\nu(x) \sim |x|^{-(\nu+1)}$ as $|x| \to \infty$ (polynomial tails),
-        versus $e^{-x^2/2}$ for the Gaussian (exponential tails).
-    \item \textbf{Gaussian limit:} $t_\nu \to \mathcal{N}(0,1)$ as $\nu \to \infty$.
-\end{itemize}
-
-\subsection{The variance-preservation problem}
-
-A naive replacement of $\Phi$ by $T_\nu$ (the CDF of $t_\nu$) in \eqref{eq:p_gauss} would distort the
-variance calibration. To see this, note that if $\varepsilon_t \sim t_\nu$, then:
-\begin{equation}
-    \Var(r_{t,T} \mid \F_t) = v_t(\tau) \cdot \Var(\varepsilon_t) = v_t(\tau) \cdot \frac{\nu}{\nu-2}
-    \neq v_t(\tau),
-\end{equation}
-so the actual conditional variance would exceed the Stage~1 forecast by a factor of $\nu/(\nu-2) > 1$.
-This is especially problematic for small $\nu$ (heavy tails): at $\nu = 4$, the inflation factor is 2.
-
-\subsection{Variance-preserving scale}
-
-\begin{proposition}[Variance-preserving Student-$t$ innovation]
-\label{prop:var_preserve}
-Let $X_\nu \sim t_\nu$ with $\nu > 2$. Define:
-\begin{equation}
-    s(\nu) := \sqrt{\frac{\nu - 2}{\nu}}, \qquad \varepsilon_t := s(\nu) \cdot X_\nu.
-    \label{eq:vp_scale}
-\end{equation}
-Then:
-\begin{enumerate}[nosep, label=(\roman*)]
-    \item $\E[\varepsilon_t] = 0$.
-    \item $\Var(\varepsilon_t) = 1$.
-    \item $\varepsilon_t$ has heavier tails than $\mathcal{N}(0,1)$ for all finite $\nu > 2$.
-    \item $\varepsilon_t \to \mathcal{N}(0,1)$ in distribution as $\nu \to \infty$.
-\end{enumerate}
-\end{proposition}
-
-\begin{proof}
-\hfill
-\begin{enumerate}[nosep, label=(\roman*)]
-    \item $\E[\varepsilon_t] = s(\nu) \cdot \E[X_\nu] = s(\nu) \cdot 0 = 0$ since $\nu > 2 > 1$.
-    \item $\Var(\varepsilon_t) = s(\nu)^2 \cdot \Var(X_\nu) = \frac{\nu-2}{\nu} \cdot \frac{\nu}{\nu-2} = 1$.
-    \item The density of $\varepsilon_t$ is $g(x) = \frac{1}{s(\nu)} f_\nu(x/s(\nu))$, which has polynomial
-        tail decay $|x|^{-(\nu+1)}$, heavier than the Gaussian exponential decay for any finite $\nu$.
-    \item As $\nu \to \infty$, $s(\nu) \to 1$ and $X_\nu \to \mathcal{N}(0,1)$ in distribution, so
-        $\varepsilon_t = s(\nu) X_\nu \to \mathcal{N}(0,1)$.
-        \qedhere
-\end{enumerate}
-\end{proof}
-
-\begin{remark}[Why $\nu > 2$ is essential]
-The variance-preserving scale $s(\nu) = \sqrt{(\nu-2)/\nu}$ requires $\nu > 2$ for $s(\nu)$ to be real and positive.
-At $\nu = 2$, $s(\nu) = 0$ (degenerate), and for $\nu \leq 2$ the variance of $t_\nu$ is infinite, so the
-concept of variance preservation is undefined. This imposes a hard floor $\nu_{\min} > 2$ on the degrees-of-freedom
-parameter. In practice, we use $\nu_{\min} = 3$ to maintain a safety margin.
-\end{remark}
-
-\subsection{The Student-$t$ pricer}
-
-Substituting the variance-preserving innovation \eqref{eq:vp_scale} into the decomposition \eqref{eq:decomp}:
-\begin{equation}
-    r_{t,T} = \sqrt{v_t(\tau)} \cdot s(\nu) \cdot X_\nu, \qquad X_\nu \sim t_\nu.
-\end{equation}
-Therefore:
-\begin{equation}
-    \Prob(r_{t,T} > k_t \mid \F_t) = \Prob\!\left(X_\nu > \frac{k_t}{s(\nu)\sqrt{v_t(\tau)}}\right)
-    = 1 - T_\nu\!\left(\frac{k_t}{s(\nu)\sqrt{v_t(\tau)}}\right),
-\end{equation}
-where $T_\nu$ is the CDF of $t_\nu$. Using the symmetry $T_\nu(-x) = 1 - T_\nu(x)$:
-
-\begin{equation}
-    \boxed{
-    p_t^{(t)} = T_\nu\!\left(-\frac{k_t}{s(\nu)\sqrt{v_t(\tau)}}\right)
-    = T_\nu\!\left(-\frac{\ln(K/S_t)}{s(\nu)\,\sqrt{v_t(\tau;\theta)}}\right).
-    }
-    \label{eq:p_student}
-\end{equation}
-
-\begin{proposition}[Properties of the Student-$t$ pricer]
-\label{prop:pricer_properties}
-The pricing formula \eqref{eq:p_student} satisfies:
-\begin{enumerate}[nosep, label=(\roman*)]
-    \item \textbf{At-the-money symmetry:} $p_t^{(t)} = \frac{1}{2}$ when $S_t = K$ ($k_t = 0$), for all $\nu > 2$.
-    \item \textbf{Boundary conditions:} $p_t^{(t)} \to 1$ as $S_t/K \to \infty$ and $p_t^{(t)} \to 0$ as $S_t/K \to 0$.
-    \item \textbf{Monotonicity:} $p_t^{(t)}$ is strictly increasing in $S_t$ (holding other variables fixed).
-    \item \textbf{Gaussian nesting:} $p_t^{(t)} \to p_t^{\mathrm{Gauss}}$ as $\nu \to \infty$.
-    \item \textbf{Variance invariance:} The conditional variance $\Var(r_{t,T} \mid \F_t) = v_t(\tau)$ is
-        independent of $\nu$. Changing $\nu$ affects only the tail shape.
-    \item \textbf{Tail enrichment:} For $|k_t| \gg s(\nu)\sqrt{v_t(\tau)}$ (deep out-of-the-money),
-        the Student-$t$ pricer assigns higher probability to extreme outcomes than the Gaussian pricer.
-\end{enumerate}
-\end{proposition}
-
-\begin{proof}
-Properties (i)--(iv) follow directly from the properties of $T_\nu$ (symmetry about zero, limits,
-monotonicity, and Gaussian convergence). Property (v) is Proposition~\ref{prop:var_preserve}(ii).
-For (vi), note that $1 - T_\nu(x) \sim c_\nu x^{-\nu}$ for large $x$ (polynomial decay), while
-$1 - \Phi(x) \sim \phi(x)/x$ (exponential decay), so $[1 - T_\nu(x)] / [1 - \Phi(x)] \to \infty$
-as $x \to \infty$.
-\end{proof}
-
-\subsection{Calibration of $\nu$}
-\label{sec:nu_calibration}
-
-With the Stage~1 variance $\hat{v}_i$ frozen, the standardized residuals $z_i = r_i / \sqrt{\hat{v}_i}$
-are treated as realizations of the variance-preserving Student-$t$ innovation \eqref{eq:vp_scale}.
-The density of $\varepsilon = s(\nu) X_\nu$ evaluated at $z$ is:
-\begin{equation}
-    g_\nu(z) = \frac{1}{s(\nu)}\,f_\nu\!\left(\frac{z}{s(\nu)}\right),
-    \label{eq:vp_density}
-\end{equation}
-where $f_\nu$ is the standard $t_\nu$ density \eqref{eq:t_density}. The log-likelihood is:
-\begin{equation}
-    \boxed{
-    \ell(\nu) = \sum_{i=1}^{N} \left[
-    \ln\Gamma\!\left(\tfrac{\nu+1}{2}\right)
-    - \ln\Gamma\!\left(\tfrac{\nu}{2}\right)
-    - \tfrac{1}{2}\ln(\nu\pi)
-    - \tfrac{\nu+1}{2}\ln\!\left(1 + \frac{w_i^2}{\nu}\right)
-    - \ln s(\nu)
-    \right],
-    }
-    \label{eq:t_loglik}
-\end{equation}
-where $w_i := z_i / s(\nu)$ is the rescaled residual. The maximum likelihood estimator is:
-\begin{equation}
-    \hat{\nu} = \arg\max_{\nu \in [3.01,\, 100]} \ell(\nu).
-    \label{eq:nu_mle}
-\end{equation}
-
-\begin{remark}
-The lower bound $\nu_{\min} = 3.01$ ensures that the variance of $t_\nu$ exists (required for the
-variance-preserving scale) and that the kurtosis is finite (required for $\nu > 4$, though this is not
-strictly necessary for the pricer). The single parameter $\nu$ controls both the kurtosis and the tail
-decay rate, which is sufficient for a one-parameter shape extension.
-\end{remark}
-
-\subsection{Why the Student-$t$ is an appropriate choice}
-\label{sec:t_justification}
-
-The use of the Student-$t$ distribution for the standardized innovations merits explicit justification.
-
-\subsubsection{Theoretical motivation: normal-variance mixtures}
-
-The Student-$t$ distribution arises as a \emph{normal-variance mixture}. Specifically, if
-\begin{equation}
-    \varepsilon \mid V \sim \mathcal{N}(0, V), \qquad V \sim \mathrm{Inv\text{-}Gamma}\!\left(\tfrac{\nu}{2},\, \tfrac{\nu}{2}\right),
-    \label{eq:normal_variance_mixture}
-\end{equation}
-then the marginal distribution of $\varepsilon$ is $t_\nu$ (up to the variance-preserving rescaling).
-This representation admits a natural interpretation in our setting: the conditional variance $v_t(\tau)$
-from Stage~1 captures the \emph{predictable} part of the variance, but there remains an \emph{unpredictable}
-multiplicative perturbation $V$ of the local variance. If $V$ follows an inverse-gamma distribution
-(a conjugate prior for the normal variance), the marginalized returns are Student-$t$.
-
-In other words, the Student-$t$ model is the Bayesian predictive distribution under uncertainty about the true
-local variance, given a diffusive price process with random variance. This is precisely the situation in
-high-frequency markets where the instantaneous volatility fluctuates on time scales shorter than the forecast
-horizon.
-
-\subsubsection{Practical motivation: flexible kurtosis with unit variance}
-
-Among unit-mean, unit-variance, symmetric, unimodal distributions commonly used in finance, the Student-$t$
-family offers:
-\begin{itemize}[nosep]
-    \item A single ``knob'' $\nu$ that interpolates continuously between very heavy tails ($\nu \to 2^+$)
-        and the Gaussian limit ($\nu \to \infty$).
-    \item A closed-form CDF (via the regularized incomplete beta function), enabling microsecond-level evaluation.
-    \item Kurtosis $3 + 6/(\nu - 4)$ for $\nu > 4$, providing a direct mapping between $\nu$ and the
-        fourth-moment excess.
-    \item Well-understood MLE properties: the score function and Fisher information for $\nu$ are available
-        in closed form, and the MLE is consistent and asymptotically normal under standard regularity conditions.
-\end{itemize}
-
-\subsubsection{Comparison with alternatives}
-
-Other heavy-tailed innovation distributions (generalized hyperbolic, normal-inverse Gaussian, stable)
-offer additional flexibility but at the cost of more parameters and/or infinite variance (for stable
-distributions with index $< 2$). The Student-$t$ is the minimal extension of the Gaussian that captures
-excess kurtosis with a single parameter while maintaining finite variance.
-
-
-% ===================================================================
-\section{The Decoupling Guarantee}
-\label{sec:decoupling}
-
-The two-stage architecture rests on a formal guarantee that Stage~2 cannot corrupt Stage~1.
-
-\begin{theorem}[Decoupling]
-\label{thm:decoupling}
-Let $v_t(\tau;\hat{\theta})$ be the Stage~1 variance forecast obtained by QLIKE minimization, and let
-$\hat{\nu}$ be the Stage~2 degrees-of-freedom parameter obtained by maximizing \eqref{eq:t_loglik} with
-$\hat{v}_i$ frozen. Then:
-\begin{enumerate}[nosep, label=(\roman*)]
-    \item The conditional second moment of $r_{t,T}$ under the Student-$t$ model is $v_t(\tau;\hat{\theta})$,
-        independent of $\hat{\nu}$.
-    \item The binary price $p_t^{(t)}$ given by \eqref{eq:p_student} depends on $\hat{\nu}$ only through
-        the tail shape, not through the variance.
-    \item If the true innovation distribution is $\varepsilon_t \sim \mathcal{N}(0,1)$, then $\hat{\nu} \to \infty$
-        in probability as $N \to \infty$, and $p_t^{(t)} \to p_t^{\mathrm{Gauss}}$.
-\end{enumerate}
-\end{theorem}
-
-\begin{proof}
-\hfill
-\begin{enumerate}[nosep, label=(\roman*)]
-    \item Under the Student-$t$ model with variance-preserving scale:
-        $\Var(r_{t,T} \mid \F_t) = v_t(\tau) \cdot \Var(s(\hat\nu) X_{\hat\nu}) = v_t(\tau) \cdot 1 = v_t(\tau)$,
-        by Proposition~\ref{prop:var_preserve}(ii). This holds for all $\hat{\nu} > 2$.
-    \item In \eqref{eq:p_student}, $\hat{\nu}$ enters only through $T_\nu$ and $s(\nu)$. The variance
-        $v_t(\tau)$ is determined entirely by $\hat{\theta}$ and does not depend on $\hat{\nu}$.
-    \item Under Gaussian innovations, the standardized residuals $z_i \sim \mathcal{N}(0,1)$. The likelihood
-        ratio of $t_\nu$ versus $\mathcal{N}(0,1)$ converges to 1 for each observation as $\nu \to \infty$.
-        By consistency of MLE, $\hat{\nu} \to \infty$ in probability.
-        \qedhere
-\end{enumerate}
-\end{proof}
-
-\begin{remark}[Why decoupling is more than convenience]
-The decoupling guarantee has a practical consequence beyond mathematical elegance. It means that the variance
-forecast can be independently validated (via the $u$-diagnostics in Section~\ref{sec:diagnostics}) without
-regard to the tail parameter $\nu$. And conversely, $\nu$ can be recalibrated (e.g.\ after a regime change)
-without re-running Stage~1. This modularity is essential for a system where the variance model may be retrained
-daily but the tail parameter may be updated more or less frequently.
-\end{remark}
-
-
-% ===================================================================
-\section{Proper Scoring Rules and Composability}
+\section{Proper Scoring Rules}
 \label{sec:scoring_rules}
 
-The two-stage architecture is grounded in the theory of proper scoring rules \citep{gneiting2007strictly}.
+The variance-first approach is grounded in the theory of proper scoring rules \citep{gneiting2007strictly}.
 This section provides the relevant theoretical background.
 
 \subsection{Definitions}
@@ -888,32 +628,12 @@ This is strictly proper for the Bernoulli parameter $p^* = \Prob(Y=1)$: the expe
 $\E[L_{\mathrm{LL}}(Y, p)] = -p^*\ln p - (1-p^*)\ln(1-p)$ is uniquely minimized at $p = p^*$
 (by the Gibbs inequality).
 
-\subsection{Composability of proper scoring rules}
-
-\begin{proposition}[Informal composability]
-\label{prop:composability}
-If each component of a composite forecast is calibrated with a proper scoring rule that targets the
-relevant functional of the distribution (variance for QLIKE, distributional shape for MLE), then
-the composite forecast inherits calibration properties from each component, provided the components
-are identified (i.e.\ the decomposition is variance-preserving so that the two calibration targets
-are orthogonal).
-\end{proposition}
-
-\begin{remark}
-This is why the two-stage model can achieve excellent binary log-loss \emph{without ever optimizing
-binary log-loss directly}. Stage~1's QLIKE ensures honest variance. Stage~2's MLE ensures correct
-tail shape. The binary probability inherits both properties through the variance-preserving construction.
-In contrast, directly optimizing binary log-loss over both variance and tail parameters simultaneously
-creates an adversarial dynamic where improvements in binary log-loss can come from variance distortion
-(Remark~\ref{rem:why_not_logloss}).
-\end{remark}
-
 
 % ===================================================================
 \section{Statistical Estimation}
 \label{sec:estimation}
 
-\subsection{Stage 1 optimization}
+\subsection{QLIKE optimization}
 
 The QLIKE objective \eqref{eq:qlike_weighted} is minimized over
 $\theta = (c, \alpha, k_0, k_1)$ subject to box constraints:
@@ -948,28 +668,6 @@ $z = k_0 + k_1\ln\tau$. Then:
 \end{equation}
 with $\partial z / \partial k_0 = 1$ and $\partial z / \partial k_1 = \ln\tau$.
 
-\subsection{Stage 2 optimization}
-
-The Student-$t$ log-likelihood \eqref{eq:t_loglik} is maximized over $\nu \in [\nu_{\min}, \nu_{\max}]$
-(a one-dimensional bounded optimization). The gradient with respect to $\nu$ is:
-\begin{equation}
-    \frac{\partial \ell}{\partial \nu} = \sum_{i=1}^{N}\left[
-    \tfrac{1}{2}\psi\!\left(\tfrac{\nu+1}{2}\right)
-    - \tfrac{1}{2}\psi\!\left(\tfrac{\nu}{2}\right)
-    - \frac{1}{2\nu}
-    - \tfrac{1}{2}\ln\!\left(1 + \frac{w_i^2}{\nu}\right)
-    + \frac{(\nu+1)w_i^2}{2\nu(\nu + w_i^2)}
-    - \frac{\partial \ln s}{\partial \nu}
-    \right],
-    \label{eq:dll_dnu}
-\end{equation}
-where $\psi$ is the digamma function and
-\begin{equation}
-    \frac{\partial \ln s}{\partial \nu} = \frac{1}{2}\left(\frac{1}{\nu-2} - \frac{1}{\nu}\right)
-    = \frac{1}{\nu(\nu-2)}.
-\end{equation}
-The one-dimensional optimization can be solved efficiently by Brent's method or a bounded Newton step.
-
 \subsection{Cluster-robust standard errors}
 \label{sec:standard_errors}
 
@@ -985,12 +683,7 @@ within-market mean for market $m$. The cluster-robust SE is:
 \end{equation}
 where $\mathrm{sd}$ denotes the sample standard deviation with Bessel's correction. This treats each
 market hour as an independent observation, accounting for the within-market dependence induced by the
-shared terminal price $S_T$. For Stage~2, the same approach gives:
-\begin{equation}
-    \mathrm{SE}(\hat\nu) = \frac{\mathrm{sd}(g_{1,\nu}, \ldots, g_{M,\nu})}{\sqrt{M}},
-\end{equation}
-where $g_{m,\nu}$ is the per-market mean of the per-observation score $\partial\ell_i/\partial\nu$
-evaluated at $\nu = \hat\nu$.
+shared terminal price $S_T$.
 
 
 % ===================================================================
@@ -1025,33 +718,19 @@ probability output.
             and $\sigRel(t,\tau) = \sigRv(t)/\bar{\sigma}_{\mathrm{tod}}(t,\tau)$.
     \end{enumerate}
 
-    \item \textbf{Stage 1 calibration.}
+    \item \textbf{Calibration.}
     \begin{enumerate}[nosep, label=(\alph*)]
         \item Minimize market-weighted QLIKE \eqref{eq:qlike_weighted} over
             $\theta = (c, \alpha, k_0, k_1)$ with box constraints.
         \item Compute variance forecasts $\hat{v}_i = v_{t_i}(\tau_i;\hat\theta)$ for all calibration rows.
     \end{enumerate}
 
-    \item \textbf{Stage 1 diagnostics.}
+    \item \textbf{Diagnostics.}
     \begin{enumerate}[nosep, label=(\alph*)]
         \item Compute $u_i = r_i^2 / \hat{v}_i$.
         \item Check $\E[u \mid X] \approx 1$ for $X \in \{\tau, \sigRel, \Delta t_{\mathrm{last}}, h_t\}$.
         \item If diagnostics fail, iterate (adjust $\alpha$, re-smooth $\sigTod$, adjust
             shrinkage parameters $k_0, k_1$, or half-life $H$).
-    \end{enumerate}
-
-    \item \textbf{Stage 2 calibration.}
-    \begin{enumerate}[nosep, label=(\alph*)]
-        \item Compute standardized residuals $z_i = r_i / \sqrt{\hat{v}_i}$.
-        \item Maximize the Student-$t$ log-likelihood \eqref{eq:t_loglik} over $\nu \in [3.01, 100]$.
-        \item Store $\hat\nu$.
-    \end{enumerate}
-
-    \item \textbf{Stage 2 diagnostics.}
-    \begin{enumerate}[nosep, label=(\alph*)]
-        \item QQ-plot of $z_i$ against $t_{\hat\nu}$ quantiles (variance-preserving scaled).
-        \item Tail exceedance check: compare empirical $\Prob(|z| > q)$ to model prediction
-            $2[1 - T_{\hat\nu}(q / s(\hat\nu))]$ for thresholds $q \in \{2, 3, 4\}$.
     \end{enumerate}
 \end{enumerate}
 
@@ -1072,8 +751,7 @@ At each quote time $t$ with current mid-price $S_t$, strike $K$, and time to exp
     \item \textbf{Compute variance:} $\hat{v} = c^2 \cdot \bar{\sigma}_{\mathrm{tod}}^2
         \cdot \tau^\alpha \cdot f$.
     \item \textbf{Compute log-strike:} $k = \ln(K/S_t)$.
-    \item \textbf{Price (Gaussian):} $p = \Phi\!\left(-k / \sqrt{\hat{v}}\right)$.
-    \item \textbf{Price (Student-$t$):} $p = T_{\hat\nu}\!\left(-k\, /\, [s(\hat\nu)\sqrt{\hat{v}}]\right)$.
+    \item \textbf{Price:} $p = \Phi\!\left(-k / \sqrt{\hat{v}}\right)$.
 \end{enumerate}
 
 The entire computation involves elementary operations plus a single CDF evaluation and can be executed
@@ -1082,23 +760,18 @@ in microseconds.
 \subsection{Live monitoring}
 \label{sec:monitoring}
 
-The deployed model is monitored via three channels:
+The deployed model is monitored via two channels:
 
 \begin{enumerate}[nosep]
     \item \textbf{Scale monitor:} Rolling estimates of $\bar{u} = \E[u]$ and $\E[u \mid X]$ across
         $(\tau, \sigRel, \Delta t_{\mathrm{last}}, h_t)$. Detects when the variance model drifts out of calibration.
-    \item \textbf{Tail monitor:} Rolling exceedance rates $\hat{\Prob}(|z| > q)$ compared to
-        Student-$t$ predictions. Detects when the tail parameter $\nu$ needs updating.
-    \item \textbf{Override knobs:} The parameters $(c, \alpha, k_0, k_1, \nu)$
+    \item \textbf{Override knobs:} The parameters $(c, \alpha, k_0, k_1)$
         have interpretable effects. In an emergency, a trader can:
         \begin{itemize}[nosep]
             \item Increase $c$ to widen the variance forecast globally.
             \item Increase $k_0$ to shrink more aggressively toward the seasonal baseline.
-            \item Decrease $\nu$ to make tails heavier.
+            \item Decrease $\alpha$ to flatten the horizon scaling.
         \end{itemize}
-        Because of the decoupling guarantee (Theorem~\ref{thm:decoupling}), adjusting $\nu$ does not
-        affect the variance forecast, and adjusting $(c, \alpha, k_0, k_1)$ does not
-        affect the tail parameter.
 \end{enumerate}
 
 
@@ -1106,35 +779,26 @@ The deployed model is monitored via three channels:
 \section{Extensions and Generalizations}
 \label{sec:extensions}
 
-\subsection{State-dependent degrees of freedom}
+\subsection{Heavy-tailed innovations}
 
-The fixed-$\nu$ model applies uniform tail weight across all market conditions. One could parameterize
-$\nu$ as a function of state variables (e.g.\ via a sigmoid link to ensure $\nu \in [\nu_{\min}, \nu_{\max}]$).
-The variance-preserving property (Proposition~\ref{prop:var_preserve}) holds observation-by-observation
-for any $\nu_i > 2$, so the decoupling guarantee would extend immediately. However, walk-forward
-cross-validation on BTC hourly data shows that the additional parameters provide no out-of-sample
-improvement over the scalar $\nu$ baseline, so we adopt the fixed-$\nu$ specification.
-
-\subsection{Alternative innovation distributions}
-
-The variance-preserving overlay framework is not specific to the Student-$t$. Any location-scale family
-$F_\phi$ with $\E[X] = 0$, $\Var(X) = \sigma^2_\phi$ can be made variance-preserving by scaling:
-\begin{equation}
-    \varepsilon_t = \frac{X}{\sigma_\phi}, \qquad X \sim F_\phi.
-\end{equation}
-This yields the pricing formula:
+The Gaussian innovation assumption may be relaxed by replacing $\varepsilon_t \sim \mathcal{N}(0,1)$
+with a heavier-tailed distribution. Any location-scale family $F_\phi$ with $\E[X] = 0$,
+$\Var(X) = \sigma^2_\phi$ can be made variance-preserving by scaling $\varepsilon_t = X / \sigma_\phi$,
+yielding the generalized pricing formula:
 \begin{equation}
     p_t = 1 - F_\phi\!\left(\frac{k_t \cdot \sigma_\phi}{\sqrt{v_t(\tau)}}\right).
 \end{equation}
-Examples include the normal-inverse Gaussian (NIG) and generalized hyperbolic (GH) families. The choice
-of family should be driven by empirical QQ-plot fit and parsimony.
+The Student-$t$ family is a natural candidate (one ``knob'' controlling kurtosis with closed-form CDF),
+though other choices (normal-inverse Gaussian, generalized hyperbolic) are also possible. Importantly,
+the variance-preserving construction ensures that the QLIKE-calibrated variance $v_t(\tau)$ remains valid
+regardless of the innovation distribution, so the tail shape can be calibrated independently.
 
 \subsection{Non-zero drift}
 
 If Assumption~\ref{ass:zero_drift} is relaxed (e.g.\ at longer horizons where expected returns become
 non-negligible), the pricing formula generalizes to:
 \begin{equation}
-    p_t = T_\nu\!\left(-\frac{k_t - \mu_t(\tau)}{s(\nu)\sqrt{v_t(\tau)}}\right),
+    p_t = \Phi\!\left(-\frac{k_t - \mu_t(\tau)}{\sqrt{v_t(\tau)}}\right),
 \end{equation}
 where $\mu_t(\tau) = \E[r_{t,T} \mid \F_t]$ is a drift forecast. The QLIKE objective targets the
 \emph{centered} second moment $\E[(r - \mu)^2 \mid \F_t]$ instead:
@@ -1182,14 +846,9 @@ $k_0, k_1$ & Shrinkage parameters (baseline, horizon) \\
 $m_t(\tau)$ & State-dependent shrinkage weight \\
 $u_i = r_i^2 / \hat{v}_i$ & Normalized squared return (diagnostic) \\
 \midrule
-$\nu$ & Student-$t$ degrees of freedom (Stage~2) \\
-$s(\nu) = \sqrt{(\nu-2)/\nu}$ & Variance-preserving scale \\
-$T_\nu(\cdot)$ & Student-$t$ CDF \\
 $\Phi(\cdot)$ & Standard normal CDF \\
-\midrule
 $\mathrm{QLIKE}$ & Proper scoring rule for variance \\
 $L_{\mathrm{LL}}$ & Binary log-loss \\
-$\ell(\nu)$ & Student-$t$ log-likelihood \\
 \bottomrule
 \end{tabular}
 \end{table}

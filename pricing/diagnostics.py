@@ -147,22 +147,20 @@ def _print_eu_table(var_name, bins_list):
 
 def tail_diagnostics(
     z: np.ndarray,
-    nu: np.ndarray | None = None,
     thresholds: np.ndarray | None = None,
     verbose: bool = True,
 ) -> dict:
-    """Tail exceedance diagnostics: empirical P(|z|>c) vs Gaussian and Student-t.
+    """Tail exceedance diagnostics: empirical P(|z|>c) vs Gaussian.
 
     Args:
         z: Standardized residuals r / sqrt(v_hat).
-        nu: Degrees-of-freedom array (same length as z). None = skip t comparison.
         thresholds: Array of thresholds c. Default: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0].
         verbose: Print table.
 
     Returns:
-        Dict with keys {thresholds, empirical, gaussian, student_t (if nu given)}.
+        Dict with keys {thresholds, empirical, gaussian}.
     """
-    from scipy.stats import norm, t as student_t_dist
+    from scipy.stats import norm
 
     if thresholds is None:
         thresholds = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
@@ -173,27 +171,11 @@ def tail_diagnostics(
 
     result = {"thresholds": thresholds, "empirical": empirical, "gaussian": gaussian}
 
-    if nu is not None:
-        scale = np.sqrt((nu - 2.0) / nu)
-        student_t_exc = np.array([
-            float(np.mean(2.0 * student_t_dist.sf(c / scale, df=nu)))
-            for c in thresholds
-        ])
-        result["student_t"] = student_t_exc
-
     if verbose:
         print(f"\n  Tail exceedance P(|z| > c):")
-        header = f"    {'c':>5s}  {'Empir':>8s}  {'Gauss':>8s}"
-        sep = f"    {'─'*5}  {'─'*8}  {'─'*8}"
-        if nu is not None:
-            header += f"  {'t-model':>8s}"
-            sep += f"  {'─'*8}"
-        print(header)
-        print(sep)
+        print(f"    {'c':>5s}  {'Empir':>8s}  {'Gauss':>8s}")
+        print(f"    {'─'*5}  {'─'*8}  {'─'*8}")
         for i, c in enumerate(thresholds):
-            line = f"    {c:5.1f}  {empirical[i]:8.4%}  {gaussian[i]:8.4%}"
-            if nu is not None:
-                line += f"  {result['student_t'][i]:8.4%}"
-            print(line)
+            print(f"    {c:5.1f}  {empirical[i]:8.4%}  {gaussian[i]:8.4%}")
 
     return result

@@ -5,7 +5,7 @@ from live market features. No dataset or pandas dependency at runtime.
 
 Usage:
     pricer = Pricer.from_calibration("pricing/output")
-    p_gauss, p_t = pricer.price(
+    p = pricer.price(
         S=104000, K=103500, tau=1800,
         sigma_rv=3.5e-5, t_ms=1706745600000,
     )
@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import norm, t as student_t
+from scipy.stats import norm
 
 
 def _is_weekend_ms(t_ms: np.ndarray) -> np.ndarray:
@@ -35,12 +35,12 @@ class Pricer:
 
     v = c^2 * sigma_tod^2 * tau^alpha * [m + (1-m)*sigma_rel^2]
     m = sigmoid(k0 + k1*log(tau))
+    p = Phi(-k / sqrt(v))
     """
 
     def __init__(
         self,
         vol_params: dict,
-        nu: float,
         sigma_tod_weekday: np.ndarray,
         sigma_tod_weekend: np.ndarray,
         bucket_minutes: int = 5,
@@ -49,8 +49,6 @@ class Pricer:
         self.alpha = vol_params["alpha"]
         self.k0 = vol_params.get("k0", -100.0)
         self.k1 = vol_params.get("k1", 0.0)
-        self.nu = nu
-        self.s_nu = np.sqrt((nu - 2.0) / nu)
         self.sigma_tod_weekday = sigma_tod_weekday
         self.sigma_tod_weekend = sigma_tod_weekend
         self.bucket_minutes = bucket_minutes
@@ -67,20 +65,12 @@ class Pricer:
             if k in vp:
                 vol_params[k] = vp[k]
 
-        fixed_path = output_dir / "fixed_t_params.json"
-        if fixed_path.exists():
-            with open(fixed_path) as f:
-                tp = json.load(f)
-            nu = tp["nu"]
-        else:
-            nu = 30.0
-
         import pandas as pd
         sv_wd = pd.read_parquet(output_dir / "seasonal_vol_weekday.parquet")
         sv_we = pd.read_parquet(output_dir / "seasonal_vol_weekend.parquet")
         bucket_minutes = 5
 
-        return cls(vol_params, nu, sv_wd["sigma_tod"].values, sv_we["sigma_tod"].values, bucket_minutes)
+        return cls(vol_params, sv_wd["sigma_tod"].values, sv_we["sigma_tod"].values, bucket_minutes)
 
     def _sigma_tod_integrated(self, t_ms, tau):
         """Integrated remaining seasonal vol: RMS average of sigma_tod over [t, t+tau]."""
@@ -124,7 +114,7 @@ class Pricer:
         return np.sqrt(avg_var)
 
     def price(self, S, K, tau, sigma_rv, t_ms):
-        """Compute Gaussian and Student-t binary option prices.
+        """Compute Gaussian binary option price P(S_T > K).
 
         Args:
             S: Current mid price(s).
@@ -134,7 +124,7 @@ class Pricer:
             t_ms: Current timestamp (epoch milliseconds, for sigma_tod lookup).
 
         Returns:
-            (p_gauss, p_t): Gaussian and Student-t prices as numpy arrays.
+            Gaussian price as numpy array.
         """
         S = np.asarray(S, dtype=np.float64)
         K = np.asarray(K, dtype=np.float64)
@@ -159,10 +149,6 @@ class Pricer:
         k = np.log(K / S)
         sqrt_v = np.sqrt(np.maximum(v, 1e-20))
 
-        p_gauss = norm.cdf(-k / sqrt_v)
-        p_t = student_t.cdf(-k / (self.s_nu * sqrt_v), df=self.nu)
+        p = norm.cdf(-k / sqrt_v)
 
-        return (
-            np.clip(p_gauss, 1e-9, 1.0 - 1e-9),
-            np.clip(p_t, 1e-9, 1.0 - 1e-9),
-        )
+        return np.clip(p, 1e-9, 1.0 - 1e-9)

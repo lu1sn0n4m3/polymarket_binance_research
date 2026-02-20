@@ -33,27 +33,22 @@ dataset = pd.read_parquet(DATA_DIR / "calibration_dataset.parquet")
 df = dataset[dataset["pm_mid"].notna()].copy()
 print(f"Dataset: {len(df):,} rows with Polymarket data ({df['market_id'].nunique()} markets)")
 
-# Load models and params
-model_gauss = get_model("gaussian")
-model_t = get_model("fixed_t")
+# Load model and params
+model = get_model("gaussian")
 
 with open(DATA_DIR / "gaussian_vol_params.json") as f:
     vol_params = json.load(f)
-with open(DATA_DIR / "fixed_t_params.json") as f:
-    tail_params = json.load(f)
 
 S = df["S"].values.astype(np.float64)
 K = df["K"].values.astype(np.float64)
 tau = df["tau"].values.astype(np.float64)
 y = df["y"].values.astype(np.float64)
 pm = df["pm_mid"].values.astype(np.float64)
-features = {f: df[f].values.astype(np.float64) for f in model_t.required_features()}
+features = {f: df[f].values.astype(np.float64) for f in model.required_features()}
 
-gauss_params = {k: vol_params[k] for k in model_gauss.param_names()}
-t_params = {k: tail_params[k] for k in model_t.param_names()}
+model_params = {k: vol_params[k] for k in model.param_names()}
 
-p_gauss = model_gauss.predict(gauss_params, S, K, tau, features)
-p_model = model_t.predict(t_params, S, K, tau, features)
+p_model = model.predict(model_params, S, K, tau, features)
 
 # Clip PM too (it can be 0 or 1 on thin markets)
 pm_clipped = np.clip(pm, 1e-3, 1 - 1e-3)
@@ -77,7 +72,6 @@ def log_loss_per_row(y, p):
 # 1. Overall comparison
 # =====================================================================
 ll_baseline = log_loss(y, np.full_like(y, y.mean()))
-ll_gauss = log_loss(y, p_gauss)
 ll_model = log_loss(y, p_model)
 ll_pm = log_loss(y, pm_clipped)
 
@@ -85,8 +79,7 @@ print(f"\n{'='*65}")
 print(f"OVERALL LOG-LOSS COMPARISON")
 print(f"{'='*65}")
 print(f"  Baseline (constant):   {ll_baseline:.6f}")
-print(f"  Gaussian (Stage 1):    {ll_gauss:.6f}  ({(ll_baseline-ll_gauss)/ll_baseline*100:+.1f}%)")
-print(f"  Adaptive-t (Stage 2):  {ll_model:.6f}  ({(ll_baseline-ll_model)/ll_baseline*100:+.1f}%)")
+print(f"  Model (Gaussian):      {ll_model:.6f}  ({(ll_baseline-ll_model)/ll_baseline*100:+.1f}%)")
 print(f"  Polymarket:            {ll_pm:.6f}  ({(ll_baseline-ll_pm)/ll_baseline*100:+.1f}%)")
 print(f"  Model vs PM:           {ll_model - ll_pm:+.6f} {'(model better)' if ll_model < ll_pm else '(PM better)'}")
 
@@ -268,9 +261,9 @@ C_GAUSS = "#94a3b8"
 
 # Panel 1: Overall LL bar chart
 ax = axes[0, 0]
-names = ["Baseline", "Gaussian", "Adaptive-t", "Polymarket"]
-lls = [ll_baseline, ll_gauss, ll_model, ll_pm]
-colors = [C_GAUSS, "#f59e0b", C_MODEL, C_PM]
+names = ["Baseline", "Model", "Polymarket"]
+lls = [ll_baseline, ll_model, ll_pm]
+colors = [C_GAUSS, C_MODEL, C_PM]
 bars = ax.bar(names, lls, color=colors, width=0.6, edgecolor="white", linewidth=1.5)
 for bar, ll in zip(bars, lls):
     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.003,
