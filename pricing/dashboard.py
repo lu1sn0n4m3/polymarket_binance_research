@@ -34,7 +34,7 @@ from pricing.dataset import build_dataset, DatasetConfig
 from pricing.diagnostics import variance_ratio_diagnostics
 from pricing.features.seasonal_vol import compute_seasonal_vol
 from pricing.features.realized_vol import compute_rv_ewma
-from src.data import (
+from marketdata.data import (
     load_binance, load_binance_labels,
     load_polymarket_market, get_cache_status,
 )

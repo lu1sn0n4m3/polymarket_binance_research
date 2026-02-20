@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import load_binance_bbo
+from marketdata.data import load_binance_bbo
 
 
 def check_date_range(start_date: datetime, end_date: datetime, asset: str = "BTC"):

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.alignment import (
+from marketdata.data.alignment import (
     align_asof,
     align_bucketed,
     resample_to_grid,

@@ -6,8 +6,8 @@ from typing import Literal
 import duckdb
 import pandas as pd
 
-from src.config import get_config
-from src.data.connection import get_connection
+from marketdata.config import get_config
+from marketdata.data.connection import get_connection
 
 
 def _build_s3_path(

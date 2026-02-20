@@ -9,7 +9,7 @@ import time
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import load_resampled_bbo, get_cache_info
+from marketdata.data import load_resampled_bbo, get_cache_info
 
 
 def build_dataset(

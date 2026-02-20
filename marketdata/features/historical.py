@@ -9,7 +9,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.data.session import HourlyMarketSession, load_sessions_range
+from marketdata.data.session import HourlyMarketSession, load_sessions_range
 
 
 def compute_hourly_returns(

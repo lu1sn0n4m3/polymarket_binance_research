@@ -49,7 +49,7 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
 
     The dataset is cached as parquet in cfg.output_dir.
     """
-    from src.data import load_binance, load_binance_labels
+    from marketdata.data import load_binance, load_binance_labels
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +141,7 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
     # Step 4b: Pre-load Polymarket data (single load for full date range)
     pm_lookup = {}  # hour_start_ms -> (ts_array, mid_array)
     try:
-        from src.data.resampled_polymarket import load_resampled_polymarket
+        from marketdata.data.resampled_polymarket import load_resampled_polymarket
         _has_pm = True
     except ImportError:
         _has_pm = False

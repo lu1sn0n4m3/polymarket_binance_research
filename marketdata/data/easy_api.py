@@ -11,7 +11,7 @@ Design Philosophy:
 
 Quick Examples:
     >>> from datetime import date
-    >>> from src.data.easy_api import load_binance, load_polymarket_market, align_timestamps
+    >>> from marketdata.data.easy_api import load_binance, load_polymarket_market, align_timestamps
     >>>
     >>> # Load Binance data for any time range
     >>> bnc = load_binance(
@@ -51,11 +51,11 @@ from typing import Literal
 
 import pandas as pd
 
-from src.data.resampled_bbo import load_resampled_bbo
-from src.data.resampled_polymarket import load_resampled_polymarket
-from src.data.resampled_labels import load_resampled_labels
-from src.data.cache_manager import get_cache_info as _get_cache_info, clear_cache as _clear_cache
-from src.data.alignment import align_asof
+from marketdata.data.resampled_bbo import load_resampled_bbo
+from marketdata.data.resampled_polymarket import load_resampled_polymarket
+from marketdata.data.resampled_labels import load_resampled_labels
+from marketdata.data.cache_manager import get_cache_info as _get_cache_info, clear_cache as _clear_cache
+from marketdata.data.alignment import align_asof
 
 
 # ============================================================================

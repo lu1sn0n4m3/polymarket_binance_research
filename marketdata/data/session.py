@@ -9,9 +9,9 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from src.config import get_config
-from src.data.connection import get_connection
-from src.data.loaders import (
+from marketdata.config import get_config
+from marketdata.data.connection import get_connection
+from marketdata.data.loaders import (
     load_binance_bbo,
     load_binance_trades,
     load_polymarket_bbo,
@@ -19,7 +19,7 @@ from src.data.loaders import (
     load_polymarket_book,
     get_unique_token_ids,
 )
-from src.data.alignment import align_asof, compute_derived_fields
+from marketdata.data.alignment import align_asof, compute_derived_fields
 
 
 ET = ZoneInfo("America/New_York")
@@ -762,7 +762,7 @@ class HourlyMarketSession:
             >>> # With lookback for volatility estimation
             >>> bnc_with_lookback = session.binance_resampled("1s", include_lookback=True)
         """
-        from src.data.easy_api import load_binance
+        from marketdata.data.easy_api import load_binance
 
         start = self.lookback_start if include_lookback else self.utc_start
         return load_binance(start, self.utc_end, self.asset, interval, columns)
@@ -797,7 +797,7 @@ class HourlyMarketSession:
             >>> pm = session.polymarket_resampled("1s")
             >>> print(f"Opening Up probability: {pm['mid'].iloc[0]:.3f}")
         """
-        from src.data.easy_api import load_polymarket_market
+        from marketdata.data.easy_api import load_polymarket_market
 
         return load_polymarket_market(
             self.asset, self.market_date, self.hour_et, interval
@@ -835,7 +835,7 @@ class HourlyMarketSession:
             >>> # Analyze PM probability vs BTC price
             >>> print(aligned[["ts_recv", "mid_pm", "mid_px_bnc"]].head())
         """
-        from src.data.easy_api import align_timestamps
+        from marketdata.data.easy_api import align_timestamps
 
         pm = self.polymarket_resampled(interval)
         bnc = self.binance_resampled(interval)

@@ -121,7 +121,7 @@ tail -f logs/sync.log
 ### Python API
 
 ```python
-from src.data import get_cache_status
+from marketdata import get_cache_status
 
 # Check Binance cache
 status = get_cache_status("binance", "BTC", "1s")
@@ -188,7 +188,7 @@ python scripts/sync_resampled_cache.py \
 Check which hours have data:
 
 ```python
-from src.data import get_cache_status
+from marketdata import get_cache_status
 
 status = get_cache_status("polymarket", "BTC", "1s")
 # Check available_dates to see coverage
@@ -311,7 +311,7 @@ du -sh data/resampled_data/*/asset=ETH/
 
 ```python
 from datetime import date, timedelta
-from src.data import clear_cache
+from marketdata import clear_cache
 
 # Keep last 30 days, delete older
 cutoff = date.today() - timedelta(days=30)

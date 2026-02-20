@@ -32,7 +32,7 @@ python scripts/sync_resampled_cache.py \
 ### Example 1: Load Binance Price History
 
 ```python
-from src.data import load_binance
+from marketdata import load_binance
 
 # Load Bitcoin prices for any time range
 bnc = load_binance(
@@ -57,7 +57,7 @@ Columns: ['ts_recv', 'bid_px', 'ask_px', 'bid_sz', 'ask_sz', 'mid_px', 'spread']
 ### Example 2: Load Polymarket Market
 
 ```python
-from src.data import load_polymarket_market
+from marketdata import load_polymarket_market
 from datetime import date
 
 # Load ONE specific hourly market
@@ -83,7 +83,7 @@ Closing Up probability: 0.780
 ### Example 3: Combine Binance + Polymarket
 
 ```python
-from src.data import load_binance, load_polymarket_market, align_timestamps
+from marketdata import load_binance, load_polymarket_market, align_timestamps
 from datetime import date
 
 # Load Polymarket market
@@ -355,7 +355,7 @@ get_cache_status(
 
 **Example:**
 ```python
-from src.data import get_cache_status
+from marketdata import get_cache_status
 
 status = get_cache_status("binance", "BTC", "1s")
 print(f"Cached: {len(status['dates_cached'])} days")
@@ -377,7 +377,7 @@ clear_cache(
 **Example:**
 ```python
 from datetime import date, timedelta
-from src.data import clear_cache
+from marketdata import clear_cache
 
 # Keep last 30 days, delete older
 cutoff = date.today() - timedelta(days=30)
@@ -393,7 +393,7 @@ print(f"Deleted {deleted} files")
 
 ```python
 import numpy as np
-from src.data import load_binance
+from marketdata import load_binance
 
 # Load Bitcoin 1s data for one day
 bnc = load_binance("2026-01-19", "2026-01-20", "BTC", "1s", columns=["ts_recv", "mid_px"])
@@ -413,7 +413,7 @@ print(f"Annual RV: {rv_annual:.4f} ({rv_annual*100:.2f}%)")
 
 ```python
 from datetime import date
-from src.data import load_session
+from marketdata import load_session
 
 # Load session (includes outcome information)
 session = load_session("BTC", date(2026, 1, 19), hour_et=9)
@@ -442,7 +442,7 @@ if outcome.is_up:
 
 ```python
 from datetime import date
-from src.data import load_session
+from marketdata import load_session
 import pandas as pd
 
 # Load multiple markets
@@ -478,7 +478,7 @@ print(f"\nCorrelation: {corr:.3f}")
 
 ```python
 from datetime import date
-from src.data import load_session
+from marketdata import load_session
 
 session = load_session("BTC", date(2026, 1, 19), hour_et=9)
 
@@ -503,7 +503,7 @@ print(signal_returns)
 
 ```python
 from datetime import date
-from src.data import load_polymarket_market
+from marketdata import load_polymarket_market
 
 def safe_load_market(asset, date, hour_et, interval="1s"):
     """Load market with graceful handling of missing data."""
@@ -530,7 +530,7 @@ print(f"Found {len(markets)} markets")
 ### Recipe 6: Efficient Column Selection for Large Ranges
 
 ```python
-from src.data import load_binance
+from marketdata import load_binance
 
 # Loading 30 days of all columns (slow, large memory)
 # bnc_full = load_binance("2026-01-01", "2026-01-31", "BTC", "1s")  # DON'T DO THIS
@@ -692,7 +692,7 @@ bnc_mini = load_binance("2026-01-01", "2026-01-31", "BTC", "1s", columns=["ts_re
 **Keep cache size manageable:**
 ```python
 from datetime import date, timedelta
-from src.data import clear_cache
+from marketdata import clear_cache
 
 # Monthly cleanup: keep last 60 days
 cutoff = date.today() - timedelta(days=60)
@@ -711,7 +711,7 @@ clear_cache("polymarket", "BTC", "1s", before_date=cutoff)
 
 ```python
 import time
-from src.data import load_binance
+from marketdata import load_binance
 
 # Cache hit (fast)
 start = time.time()

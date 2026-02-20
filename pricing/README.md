@@ -103,7 +103,7 @@ streamlit run pricing/dashboard.py
 
 ### Data dependencies
 
-All data loading goes through `src/data/` (not modified by this package):
+All data loading goes through `marketdata/data/` (not modified by this package):
 
 - `load_binance(start, end, asset, interval)` -- 1s BBO data with `ts_recv`, `mid_px`
 - `load_binance_labels(start, end, asset)` -- hourly labels with `K`, `S_T`, `Y`

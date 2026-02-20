@@ -22,7 +22,7 @@ from plotly.subplots import make_subplots
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import load_binance, load_binance_labels, load_polymarket_market
+from marketdata.data import load_binance, load_binance_labels, load_polymarket_market
 
 # ---------------------------------------------------------------------------
 # Constants

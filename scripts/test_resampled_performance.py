@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from src.data import load_resampled_bbo, get_cache_info
+from marketdata.data import load_resampled_bbo, get_cache_info
 
 
 def test_loading_speed():

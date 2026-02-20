@@ -3,7 +3,7 @@
 # =============================================================================
 # PRIMARY USER-FACING API (Easy API - use these for most tasks)
 # =============================================================================
-from src.data.easy_api import (
+from marketdata.data.easy_api import (
     load_binance,
     load_binance_labels,
     load_polymarket_market,
@@ -15,8 +15,8 @@ from src.data.easy_api import (
 # =============================================================================
 # LEGACY/INTERNAL APIs (for backwards compatibility and advanced use)
 # =============================================================================
-from src.data.connection import get_connection, configure_s3
-from src.data.loaders import (
+from marketdata.data.connection import get_connection, configure_s3
+from marketdata.data.loaders import (
     load_binance_bbo,
     load_binance_trades,
     load_polymarket_bbo,
@@ -24,12 +24,12 @@ from src.data.loaders import (
     load_polymarket_book,
     get_unique_token_ids,
 )
-from src.data.alignment import align_asof, align_bucketed, resample_to_grid
-from src.data.session import HourlyMarketSession, load_session, load_sessions_range
-from src.data.resampled_bbo import load_resampled_bbo, resample_bbo_to_interval
-from src.data.resampled_polymarket import load_resampled_polymarket, resample_polymarket_to_interval
-from src.data.resampled_labels import load_resampled_labels
-from src.data.cache_manager import get_cache_info, clear_cache
+from marketdata.data.alignment import align_asof, align_bucketed, resample_to_grid
+from marketdata.data.session import HourlyMarketSession, load_session, load_sessions_range
+from marketdata.data.resampled_bbo import load_resampled_bbo, resample_bbo_to_interval
+from marketdata.data.resampled_polymarket import load_resampled_polymarket, resample_polymarket_to_interval
+from marketdata.data.resampled_labels import load_resampled_labels
+from marketdata.data.cache_manager import get_cache_info, clear_cache
 
 __all__ = [
     # ==========================================================================

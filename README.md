@@ -75,7 +75,7 @@ S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
 ```
 
-The S3 endpoint, bucket, and region are configured in `src/config.py` (defaults: `nbg1.your-objectstorage.com`, `marketdata-archive`, `eu-central`).
+The S3 endpoint, bucket, and region are configured in `marketdata/config.py` (defaults: `nbg1.your-objectstorage.com`, `marketdata-archive`, `eu-central`).
 
 ---
 
@@ -88,7 +88,7 @@ The framework provides two levels of API: a **resampled easy API** for loading c
 Use `load_binance()` to fetch Binance BBO data for any arbitrary time range. The data is automatically fetched from S3 (if not cached), resampled to your chosen interval, and cached locally.
 
 ```python
-from src.data import load_binance
+from marketdata import load_binance
 
 bnc = load_binance(
     start="2026-01-15 09:00:00",   # UTC
@@ -106,7 +106,7 @@ Returned columns: `ts_recv` (epoch ms), `bid_px`, `ask_px`, `bid_sz`, `ask_sz`, 
 Each Polymarket market is independent and covers a single hour (in Eastern Time). Use `load_polymarket_market()` to load one:
 
 ```python
-from src.data import load_polymarket_market
+from marketdata import load_polymarket_market
 
 pm = load_polymarket_market(
     asset="BTC",
@@ -123,7 +123,7 @@ All prices are automatically normalized to represent P(Up) — if the underlying
 ### Combine Binance + Polymarket
 
 ```python
-from src.data import load_binance, load_polymarket_market, align_timestamps
+from marketdata import load_binance, load_polymarket_market, align_timestamps
 
 pm = load_polymarket_market("BTC", "2026-01-19", 9, "1s")
 bnc = load_binance("2026-01-19 14:00:00", "2026-01-19 15:00:00", "BTC", "1s")
@@ -141,7 +141,7 @@ combined = align_timestamps(
 
 ```python
 from datetime import date
-from src.data import load_session
+from marketdata import load_session
 
 session = load_session(
     asset="BTC",
@@ -160,7 +160,7 @@ The `aligned` DataFrame has columns prefixed `pm_` (Polymarket) and `bnc_` (Bina
 ### Load multiple sessions
 
 ```python
-from src.data import load_sessions_range
+from marketdata import load_sessions_range
 
 sessions = load_sessions_range(
     asset="BTC",
@@ -176,7 +176,7 @@ sessions = load_sessions_range(
 ## Cache Management
 
 ```python
-from src.data import get_cache_status, clear_cache_easy
+from marketdata import get_cache_status, clear_cache_easy
 
 # Check what's cached
 status = get_cache_status("binance", "BTC", "1s")
@@ -193,7 +193,7 @@ print(f"Cached: {len(status['dates_cached'])} days, {status['size_mb']:.1f} MB")
 
 ```
 polymarket_binance_research/
-├── src/
+├── marketdata/                  # Data infrastructure layer
 │   ├── config.py                # S3 and data configuration
 │   ├── data/
 │   │   ├── easy_api.py          # Primary API: load_binance, load_polymarket_market, align_timestamps
@@ -205,10 +205,9 @@ polymarket_binance_research/
 │   │   ├── loaders.py           # Raw S3 data loading (internal)
 │   │   └── connection.py        # DuckDB + S3 setup (internal)
 │   ├── features/                # Microstructure, volatility, historical features
-│   ├── pricing/                 # Pricer interface + models (GaussianEWMA, Fundamental)
 │   └── viz/                     # Plotly visualizations (session charts, order books)
+├── pricing/                     # Model research framework (Gaussian pricer)
 ├── scripts/                     # CLI utilities for cache sync, data checks, analysis
-├── pricer_calibration/          # Model calibration pipeline (separate package)
 ├── data/resampled_data/         # Local Parquet cache (git-ignored)
 ├── docs/
 │   ├── USER_GUIDE.md            # Full API reference with recipes

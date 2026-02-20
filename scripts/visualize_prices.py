@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import load_binance
+from marketdata.data import load_binance
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -49,7 +49,7 @@ def visualize_prices(
 
     if bnc.empty:
         print("❌ No data loaded. Check cache status with:")
-        print(f'   python -c "from src.data import get_cache_status; print(get_cache_status(\\"binance\\", \\"{asset}\\", \\"{interval}\\"))"')
+        print(f'   python -c "from marketdata.data import get_cache_status; print(get_cache_status(\\"binance\\", \\"{asset}\\", \\"{interval}\\"))"')
         return
 
     print(f"✓ Loaded {len(bnc):,} rows")

@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 if TYPE_CHECKING:
-    from src.data.session import HourlyMarketSession
+    from marketdata.data.session import HourlyMarketSession
 
 
 # Colors

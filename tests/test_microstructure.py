@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.microstructure import (
+from marketdata.features.microstructure import (
     compute_microprice,
     compute_book_imbalance,
     compute_spread_bps,

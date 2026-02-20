@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.data.loaders import load_binance_trades
+from marketdata.data.loaders import load_binance_trades
 
 
 # ---------------------------------------------------------------------------

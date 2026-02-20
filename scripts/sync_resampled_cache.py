@@ -19,7 +19,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data import (
+from marketdata.data import (
     load_resampled_bbo,
     load_resampled_polymarket,
     load_resampled_labels,

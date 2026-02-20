@@ -1,4 +1,4 @@
-"""Resampled Polymarket data loading with automatic caching."""
+"""Resampled BBO data loading with automatic caching and gap detection."""
 
 import gc
 import time
@@ -9,9 +9,9 @@ from typing import Literal
 
 import pandas as pd
 
-from src.data.alignment import resample_to_grid
-from src.data.cache_manager import load_resampled_day, save_resampled_day, update_metadata
-from src.data.loaders import load_polymarket_bbo, get_unique_token_ids
+from marketdata.data.alignment import resample_to_grid
+from marketdata.data.cache_manager import load_resampled_day, save_resampled_day
+from marketdata.data.loaders import load_binance_bbo
 
 
 def _log_memory():
@@ -25,7 +25,7 @@ def _log_memory():
         return "RAM: N/A"
 
 
-def load_resampled_polymarket(
+def load_resampled_bbo(
     start_dt: datetime,
     end_dt: datetime,
     interval_ms: int = 1000,
@@ -33,42 +33,43 @@ def load_resampled_polymarket(
     cache_dir: Path | str | None = None,
     force_reload: bool = False,
 ) -> pd.DataFrame:
-    """Load resampled Polymarket data with automatic caching.
+    """Load resampled BBO data with automatic caching and gap filling.
 
-    Loads Polymarket hourly market data and resamples to fixed intervals.
-    Stores "primary" token (alphabetically first) for each hour.
-
-    Note: Polymarket prices represent the primary token probability.
-    Use HourlyMarketSession for automatic normalization to "Up" probability.
+    This is the main entry point. Automatically:
+    1. Checks what data is cached locally
+    2. Identifies missing date ranges
+    3. Loads missing data from S3
+    4. Resamples to specified interval
+    5. Saves to cache
+    6. Returns merged result
 
     Args:
         start_dt: Start datetime (UTC, timezone-aware)
         end_dt: End datetime (UTC, timezone-aware)
-        interval_ms: Resampling interval in milliseconds (500, 1000, or 5000)
+        interval_ms: Resampling interval in milliseconds (1000 or 5000)
         asset: "BTC" or "ETH"
-        cache_dir: Base cache directory (default: data/resampled_data)
+        cache_dir: Base cache directory (default: data/resampled_bbo)
         force_reload: If True, ignore cache and reload from S3
 
     Returns:
         DataFrame with columns:
             - ts_recv: int64, epoch milliseconds (aligned to grid)
-            - bid: float64 (best bid price, 0-1 probability)
-            - ask: float64 (best ask price, 0-1 probability)
+            - bid_px: float64
+            - ask_px: float64
             - bid_sz: float64
             - ask_sz: float64
-            - mid: float64 (derived mid price)
-            - spread: float64 (derived spread)
-            - microprice: float64 (size-weighted mid)
+            - mid_px: float64 (derived)
+            - spread: float64 (derived)
 
     Example:
         >>> from datetime import datetime, timezone
-        >>> df = load_resampled_polymarket(
-        ...     start_dt=datetime(2026, 1, 19, tzinfo=timezone.utc),
-        ...     end_dt=datetime(2026, 1, 20, tzinfo=timezone.utc),
+        >>> df = load_resampled_bbo(
+        ...     start_dt=datetime(2026, 1, 15, tzinfo=timezone.utc),
+        ...     end_dt=datetime(2026, 1, 17, tzinfo=timezone.utc),
         ...     interval_ms=1000,
         ...     asset="BTC"
         ... )
-        >>> # Returns 1s resampled data for Jan 19
+        >>> # Returns 1s resampled data for Jan 15-17
     """
     # Set default cache directory
     if cache_dir is None:
@@ -94,25 +95,26 @@ def load_resampled_polymarket(
             try:
                 _process_and_cache_day(date, asset, interval_ms, cache_dir)
                 # Load from cache immediately after processing
-                df_day = load_resampled_day(date, asset, interval_ms, cache_dir, venue="polymarket")
+                # This ensures memory is freed from the processing step
+                df_day = load_resampled_day(date, asset, interval_ms, cache_dir, venue="binance")
                 if df_day is not None and not df_day.empty:
                     all_days.append(df_day)
                     print(f"  {date.strftime('%Y-%m-%d')}: ✓ {len(df_day):,} rows cached")
                 else:
-                    print(f"  {date.strftime('%Y-%m-%d')}: (no markets)")
+                    print(f"  {date.strftime('%Y-%m-%d')}: (no data)")
             except Exception as e:
                 print(f"  {date.strftime('%Y-%m-%d')}: FAILED: {e}")
                 continue
         else:
             # Load from cache
-            df_day = load_resampled_day(date, asset, interval_ms, cache_dir, venue="polymarket")
+            df_day = load_resampled_day(date, asset, interval_ms, cache_dir, venue="binance")
             if df_day is not None and not df_day.empty:
                 all_days.append(df_day)
                 print(f"  {date.strftime('%Y-%m-%d')}: loaded from cache ({len(df_day):,} rows)")
 
     if not all_days:
         # Return empty DataFrame with correct columns
-        return pd.DataFrame(columns=["ts_recv", "bid", "ask", "bid_sz", "ask_sz", "mid", "spread", "microprice"])
+        return pd.DataFrame(columns=["ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz", "mid_px", "spread"])
 
     # Combine all days
     result = pd.concat(all_days, ignore_index=True)
@@ -126,15 +128,20 @@ def load_resampled_polymarket(
     return result
 
 
-def resample_polymarket_to_interval(
+def resample_bbo_to_interval(
     raw_bbo: pd.DataFrame,
     interval_ms: int = 1000,
     method: Literal["ffill", "bfill"] = "ffill",
 ) -> pd.DataFrame:
-    """Resample raw Polymarket BBO data to fixed interval grid.
+    """Resample raw BBO data to fixed interval grid.
+
+    Uses existing resample_to_grid from alignment.py but adds:
+    - Mid price and spread computation
+    - Data validation and cleaning
+    - Efficient forward-fill
 
     Args:
-        raw_bbo: Raw Polymarket BBO DataFrame from load_polymarket_bbo()
+        raw_bbo: Raw BBO DataFrame from load_binance_bbo()
         interval_ms: Target interval in milliseconds
         method: Fill method (default: ffill - forward fill last quote)
 
@@ -142,13 +149,13 @@ def resample_polymarket_to_interval(
         Resampled DataFrame aligned to interval_ms grid
     """
     if raw_bbo.empty:
-        return pd.DataFrame(columns=["ts_recv", "bid", "ask", "bid_sz", "ask_sz", "mid", "spread", "microprice"])
+        return pd.DataFrame(columns=["ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz", "mid_px", "spread"])
 
     # Clean data first
-    clean_bbo = validate_and_clean_polymarket_bbo(raw_bbo)
+    clean_bbo = validate_and_clean_bbo(raw_bbo)
 
     if clean_bbo.empty:
-        return pd.DataFrame(columns=["ts_recv", "bid", "ask", "bid_sz", "ask_sz", "mid", "spread", "microprice"])
+        return pd.DataFrame(columns=["ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz", "mid_px", "spread"])
 
     # Resample using existing utility
     resampled = resample_to_grid(
@@ -159,37 +166,28 @@ def resample_polymarket_to_interval(
     )
 
     # Compute derived fields
-    resampled["mid"] = (resampled["bid_px"] + resampled["ask_px"]) / 2
+    resampled["mid_px"] = (resampled["bid_px"] + resampled["ask_px"]) / 2
     resampled["spread"] = resampled["ask_px"] - resampled["bid_px"]
 
-    # Compute microprice (size-weighted mid)
-    total_sz = resampled["bid_sz"] + resampled["ask_sz"]
-    resampled["microprice"] = (
-        (resampled["bid_px"] * resampled["ask_sz"] + resampled["ask_px"] * resampled["bid_sz"]) / total_sz
-    )
-
-    # Rename columns to match expected schema (drop _px suffix)
-    resampled = resampled.rename(columns={"bid_px": "bid", "ask_px": "ask"})
-
     # Select and order columns
-    return resampled[["ts_recv", "bid", "ask", "bid_sz", "ask_sz", "mid", "spread", "microprice"]]
+    return resampled[["ts_recv", "bid_px", "ask_px", "bid_sz", "ask_sz", "mid_px", "spread"]]
 
 
-def validate_and_clean_polymarket_bbo(
+def validate_and_clean_bbo(
     df: pd.DataFrame,
     remove_crossed: bool = True,
     remove_zero_size: bool = True,
 ) -> pd.DataFrame:
-    """Validate and clean Polymarket BBO data.
+    """Validate and clean BBO data.
 
     Removes:
     - Rows where bid > ask (crossed quotes)
-    - Rows where bid/ask < 0 or > 1 (invalid probabilities)
+    - Rows where bid <= 0 or ask <= 0
     - Rows where bid_sz <= 0 or ask_sz <= 0 (optional)
     - Duplicate timestamps (keeps last)
 
     Args:
-        df: Raw Polymarket BBO DataFrame
+        df: Raw BBO DataFrame
         remove_crossed: Remove crossed quotes
         remove_zero_size: Remove zero-size quotes
 
@@ -202,9 +200,8 @@ def validate_and_clean_polymarket_bbo(
     # Drop NaNs in critical columns
     df = df.dropna(subset=["bid_px", "ask_px"])
 
-    # Remove invalid probabilities (must be in [0, 1])
-    df = df[(df["bid_px"] >= 0) & (df["bid_px"] <= 1)]
-    df = df[(df["ask_px"] >= 0) & (df["ask_px"] <= 1)]
+    # Remove invalid prices
+    df = df[(df["bid_px"] > 0) & (df["ask_px"] > 0)]
 
     # Remove crossed quotes
     if remove_crossed:
@@ -228,7 +225,10 @@ def get_missing_dates(
     interval_ms: int,
     cache_dir: Path,
 ) -> list[datetime]:
-    """Identify missing date ranges in Polymarket cache.
+    """Identify missing date ranges in cache.
+
+    Checks which daily files exist and returns list of missing
+    dates that need to be fetched from S3.
 
     Args:
         start_dt: Start datetime
@@ -243,7 +243,7 @@ def get_missing_dates(
     expected_dates = _generate_date_list(start_dt, end_dt)
 
     # Check which files exist
-    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / "binance" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
     if not interval_dir.exists():
         return expected_dates
 
@@ -257,7 +257,7 @@ def get_missing_dates(
         except ValueError:
             continue
 
-    # Compare using date objects
+    # Compare using date objects (year, month, day) to avoid timezone mismatch
     existing_date_strs = {d.date() for d in existing_dates}
     missing_dates = [date for date in expected_dates if date.date() not in existing_date_strs]
     return missing_dates
@@ -278,24 +278,27 @@ def _process_and_cache_day(
     asset: str,
     interval_ms: int,
     cache_dir: Path,
-) -> None:
-    """Load Polymarket data for a day from S3, resample, and cache it.
+) -> pd.DataFrame | None:
+    """Load a single day from S3, resample, and cache it.
 
-    Processes data hour-by-hour. Not all hours have Polymarket markets.
-    Stores only the "primary" token (alphabetically first) for each hour.
+    Processes data hour-by-hour to avoid memory issues with large datasets.
 
     Args:
         date: Date to process
         asset: Asset symbol
         interval_ms: Resampling interval
         cache_dir: Cache directory
+
+    Returns:
+        Resampled DataFrame or None if failed
     """
+    # Process hour by hour to avoid memory issues
+    # Save to temporary files to avoid memory accumulation
     import tempfile
     import os
-    import duckdb
 
     temp_files = []
-    hours_with_data = []
+    hours_processed = 0
 
     for hour in range(24):
         hour_start = date.replace(hour=hour, minute=0, second=0, microsecond=0)
@@ -307,43 +310,27 @@ def _process_and_cache_day(
 
         for attempt in range(max_retries):
             try:
-                # Discover tokens for this hour
-                token_ids = get_unique_token_ids(
+                # Load one hour of raw BBO data
+                raw_bbo_hour = load_binance_bbo(
                     start_dt=hour_start,
                     end_dt=hour_end,
                     asset=asset,
-                )
-
-                if not token_ids:
-                    # No market this hour, skip
-                    break
-
-                # Use primary token (alphabetically first, matches session.py pattern)
-                primary_token = token_ids[0]
-
-                # Load only primary token data
-                raw_bbo_hour = load_polymarket_bbo(
-                    start_dt=hour_start,
-                    end_dt=hour_end,
-                    asset=asset,
-                    token_id_prefix=primary_token[:6],  # Use prefix for filtering
                 )
 
                 if not raw_bbo_hour.empty:
                     # Resample this hour
-                    resampled_hour = resample_polymarket_to_interval(raw_bbo_hour, interval_ms=interval_ms)
+                    resampled_hour = resample_bbo_to_interval(raw_bbo_hour, interval_ms=interval_ms)
                     if not resampled_hour.empty:
-                        # Save to temp file immediately
+                        # Save to temp file immediately to avoid memory buildup
                         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.parquet')
                         resampled_hour.to_parquet(temp_file.name, engine='pyarrow', compression='snappy', index=False)
                         temp_files.append(temp_file.name)
                         temp_file.close()
 
-                        hours_with_data.append(hour)
-
+                        hours_processed += 1
                         # Print progress every 6 hours
-                        if len(hours_with_data) % 6 == 0:
-                            print(f"    Processed {len(hours_with_data)} markets... [{_log_memory()}]", flush=True)
+                        if hours_processed % 6 == 0:
+                            print(f"    Processed {hours_processed}/24 hours... [{_log_memory()}]", flush=True)
 
                         # Clear hour data from memory
                         del raw_bbo_hour
@@ -356,7 +343,7 @@ def _process_and_cache_day(
             except Exception as e:
                 error_str = str(e)
 
-                # Handle missing hours gracefully (404 errors or no markets)
+                # Handle missing hours gracefully (404 errors)
                 if "404" in error_str or "Not Found" in error_str:
                     break  # Skip this hour, move to next one
 
@@ -367,7 +354,7 @@ def _process_and_cache_day(
                         time.sleep(retry_delay)
                         continue  # Retry
                     else:
-                        # Max retries reached, skip this hour
+                        # Max retries reached, skip this hour but continue with others
                         print(f"    ⚠️  Failed hour {hour} after {max_retries} retries, skipping...", flush=True)
                         break
 
@@ -376,14 +363,16 @@ def _process_and_cache_day(
 
     # Combine all temp files
     if not temp_files:
-        print(f"    No Polymarket markets found for this date", flush=True)
-        return
+        return None
 
-    # Use DuckDB to combine temp files
+    # Use DuckDB to combine temp files and write directly to parquet (no pandas materialization)
     print(f"    Combining {len(temp_files)} hourly files using DuckDB... [{_log_memory()}]", flush=True)
 
+    import duckdb
+    import os
+
     # Prepare output path
-    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / "binance" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
     interval_dir.mkdir(parents=True, exist_ok=True)
     date_str = date.strftime("%Y-%m-%d")
     final_path = interval_dir / f"date={date_str}.parquet"
@@ -395,7 +384,8 @@ def _process_and_cache_day(
     try:
         conn = duckdb.connect(':memory:')
 
-        # Write directly to parquet via DuckDB
+        # Write directly to parquet via DuckDB (no pandas materialization!)
+        # This saves ~400MB by streaming instead of loading all data into memory
         query = f"""
             COPY (
                 SELECT DISTINCT ON (ts_recv) *
@@ -406,7 +396,7 @@ def _process_and_cache_day(
         conn.execute(query)
         print(f"    Wrote combined parquet [{_log_memory()}]", flush=True)
 
-        # Get row count for metadata
+        # Get row count for metadata (lightweight query)
         row_count_query = f"SELECT COUNT(*) FROM read_parquet('{temp_output}')"
         row_count = conn.execute(row_count_query).fetchone()[0]
         conn.close()
@@ -439,13 +429,15 @@ def _process_and_cache_day(
         # Clear any remaining memory
         gc.collect()
 
-    # Update metadata
+    # Update metadata directly without loading full DataFrame
+    from marketdata.data.cache_manager import update_metadata
+    from datetime import datetime as dt
+
     stats = {
         "date": date_str,
         "rows": row_count,
         "file_size_bytes": final_path.stat().st_size,
-        "cached_at": datetime.utcnow().isoformat() + "Z",
-        "hours_with_data": hours_with_data,  # Track which hours had markets
+        "cached_at": dt.utcnow().isoformat() + "Z",
     }
 
     if row_count > 0:
@@ -455,5 +447,13 @@ def _process_and_cache_day(
             "max_gap_seconds": 0.0,
         }
 
-    update_metadata(date, asset, interval_ms, cache_dir, "polymarket", stats)
-    print(f"    Saved to cache ({len(hours_with_data)} markets) [{_log_memory()}]", flush=True)
+    update_metadata(date, asset, interval_ms, cache_dir, "binance", stats)
+    print(f"    Saved to cache [{_log_memory()}]", flush=True)
+
+    # Report if partial day
+    if hours_processed < 24:
+        print(f"    ⚠️  Partial day: {hours_processed}/24 hours processed", flush=True)
+
+    # Don't load back into memory - let caller load from cache if needed
+    # This prevents memory accumulation when processing multiple days
+    return None

@@ -1,7 +1,7 @@
 """DuckDB connection management with S3 support."""
 
 import duckdb
-from src.config import get_config, S3Config
+from marketdata.config import get_config, S3Config
 
 
 _connection: duckdb.DuckDBPyConnection | None = None
