@@ -55,11 +55,13 @@ We provide a complete mathematical specification for a two-stage binary option p
 high-frequency cryptocurrency markets. The model decomposes the pricing problem into (i) honest conditional
 variance forecasting via the QLIKE proper scoring rule and (ii) a variance-preserving Student-$t$
 tail overlay that improves tail coverage without distorting the variance forecast. The final model
-has four parameters: three for the variance model ($c$, $\beta$, $\alpha$) and one for the tail shape
-($\nu$). We state all assumptions explicitly, prove the key properties (QLIKE properness, variance
-preservation under the $t$-overlay, and the decoupling guarantee), develop a rigorous diagnostic
-framework based on conditional calibration of normalized squared returns, and specify the complete
-pricer construction from raw tick data to real-time probability output. The document is self-contained
+has five parameters: four for the variance model ($c$, $\alpha$, $k_0$, $k_1$)
+and one for the tail shape ($\nu$). The variance model incorporates horizon-dependent shrinkage
+toward the seasonal baseline, reverting the regime-responsiveness term at longer horizons where
+transient volatility deviations are less informative. We state all assumptions explicitly, prove the key properties (QLIKE properness,
+variance preservation under the $t$-overlay, and the decoupling guarantee), develop a rigorous
+diagnostic framework based on conditional calibration of normalized squared returns, and specify the
+complete pricer construction from raw tick data to real-time probability output. The document is self-contained
 and purely theoretical; empirical results are reported separately.
 \end{abstract}
 
@@ -201,19 +203,13 @@ log-return equals its conditional second moment:
     \approx \E[r_{t,T}^2 \mid \F_t].
     \label{eq:var_equals_second_moment}
 \end{equation}
-We model this quantity directly:
-\begin{equation}
-    v_t(\tau) := \sigEff(t,\tau)^2 \cdot \tau,
-    \label{eq:v_def}
-\end{equation}
-where $\sigEff(t,\tau)$ is an effective volatility parameter measured in $\text{s}^{-1/2}$ units, and
-$\tau = T - t$ is the remaining time to expiry in seconds. The product $\sigEff^2\tau$ has units of
-(log-return)$^2$, matching the units of $r_{t,T}^2$.
+We model this quantity directly as $v_t(\tau;\theta)$, a parametric function of observable features
+and remaining time $\tau = T - t$. The variance has units of (log-return)$^2$, matching $r_{t,T}^2$.
 
 \subsection{Input features}
 \label{sec:features}
 
-The effective volatility is constructed from observable quantities computed on high-frequency tick data.
+The variance forecast is constructed from observable quantities computed on high-frequency tick data.
 
 \subsubsection{Tick-time realized variance}
 
@@ -244,7 +240,7 @@ over calendar-time realized variance is robustness to irregular price arrivals, 
 
 \subsubsection{Seasonal volatility curve}
 
-Partition the 24-hour day into $B$ time-of-day buckets (e.g.\ $B = 288$ five-minute buckets). For each
+Partition the 24-hour day into $B = 288$ time-of-day buckets (five-minute buckets). For each
 bucket $b \in \{1, \ldots, B\}$ and each calendar day $d$ in the calibration sample, compute the tick-time
 realized volatility:
 \begin{equation}
@@ -257,13 +253,44 @@ $\Delta$ is the bucket width. The seasonal volatility curve is defined as the cr
     \sigTod(b) := \mathrm{median}_{d}\,\hat{\sigma}_{d,b},
     \label{eq:sigma_tod}
 \end{equation}
-followed by circular smoothing (e.g.\ a Gaussian kernel convolution on the periodic domain $[0, 24)$\,h)
-to remove noise while preserving the broad intraday pattern.
+Before aggregation, the squared tick returns $(\Delta x_j)^2$ are winsorized at the $(1-q)$th percentile
+(default $q = 0.01$) to limit the influence of microstructure outliers (e.g.\ flash wicks). The seasonal
+curve is then circularly smoothed using a uniform (box) kernel of width $2W+1$ buckets on the periodic
+domain $[0, 24)$\,h (default $W = 3$, yielding a 35-minute window) and floored at $\sigTod(b) \geq 10^{-10}$
+to prevent numerical issues in buckets with negligible tick activity.
 
 \begin{remark}
 The median is used instead of the mean for robustness to outlier days (news events, flash crashes). The
-circular smoothing respects the periodicity of the time-of-day domain. The resulting curve $\sigTod(b)$
+uniform circular smoothing respects the periodicity of the time-of-day domain. The resulting curve $\sigTod(b)$
 is a non-parametric estimate of the ``typical'' volatility at each time of day.
+\end{remark}
+
+\subsubsection{Weekday--weekend split}
+
+Cryptocurrency markets trade continuously, but the intraday volatility pattern differs between weekdays
+and weekends (lower overall activity, different time-of-day peaks). We estimate separate seasonal curves
+$\sigTod^{\mathrm{wd}}(b)$ and $\sigTod^{\mathrm{we}}(b)$ on weekday and weekend subsets of the
+calibration window, and dispatch by calendar day at pricing time.
+
+\subsubsection{Integrated seasonal volatility}
+
+A point lookup $\sigTod(b_t)$ uses only the current bucket's volatility. For a contract with remaining
+life $\tau$, the relevant quantity is the average variance over the entire interval $[t, t+\tau]$. Define
+the \emph{integrated seasonal volatility}:
+\begin{equation}
+    \bar{\sigma}_{\mathrm{tod}}^2(t,\tau) := \frac{1}{\tau}\int_{t}^{t+\tau} \sigTod(s)^2\,ds,
+    \label{eq:sigma_tod_integrated}
+\end{equation}
+where $\sigTod(s)$ is evaluated at the bucket containing time $s$ (with weekday/weekend dispatch).
+This is computed by summing $\sigTod(b)^2 \cdot (\text{overlap seconds})$ across the 5-minute buckets
+that span $[t, t+\tau]$.
+
+\begin{remark}
+The integrated form is important near intraday transitions. For example, when pricing at 13:25~UTC
+(a quiet period) with $\tau = 35$~min, the remaining life extends into 14:00~UTC (U.S.\@ equity open),
+where volatility is $2$--$3\times$ higher. A point estimate would miss this; the integrated form
+captures it. Throughout the remainder of this document, $\sigTod$ refers to the integrated quantity
+$\bar{\sigma}_{\mathrm{tod}}(t,\tau)$ unless otherwise noted.
 \end{remark}
 
 \subsubsection{Real-time realized volatility}
@@ -276,74 +303,92 @@ tick-time realized variance:
     \qquad w_j := 2^{-(t - t_j)/H},
     \label{eq:sigma_rv}
 \end{equation}
-where $H > 0$ is the half-life parameter (in seconds). The exponential weighting ensures that the
-estimator responds to regime changes with a characteristic time of $H / \ln 2$ seconds.
+where $H > 0$ is the half-life parameter (in seconds; default $H = 600$). The exponential weighting ensures
+that the estimator responds to regime changes with a characteristic time of $H / \ln 2$ seconds.
+The EWMA accumulators are initialized using the first $\min(100, \lfloor N/10 \rfloor)$ tick
+observations (where $N$ is the total number of ticks) to avoid dependence on an arbitrary prior
+during cold-start.
 
 \subsubsection{Relative regime level}
 
-The relative volatility measures how the current regime compares to the seasonal norm:
+The relative volatility measures how the current regime compares to the seasonal norm over the
+contract's remaining life:
 \begin{equation}
-    \sigRel(t) := \frac{\sigRv(t)}{\sigTod(b_t)},
+    \sigRel(t,\tau) := \frac{\sigRv(t)}{\bar{\sigma}_{\mathrm{tod}}(t,\tau)},
     \label{eq:sigma_rel}
 \end{equation}
-where $b_t$ is the time-of-day bucket containing time $t$. Values $\sigRel > 1$ indicate an elevated
-regime; $\sigRel < 1$ indicates suppressed volatility relative to the seasonal expectation.
+where $\bar{\sigma}_{\mathrm{tod}}(t,\tau)$ is the integrated seasonal volatility (\ref{eq:sigma_tod_integrated}).
+Values $\sigRel > 1$ indicate an elevated regime; $\sigRel < 1$ indicates suppressed volatility
+relative to the seasonal expectation.
 
-\subsubsection{Time since last mid-price change}
-
-Define the \emph{staleness} or \emph{time since last move}:
-\begin{equation}
-    \mathrm{tsm}_t := t - \max\{t_j : t_j \leq t,\; p_j \neq p_{j-1}\}.
-    \label{eq:tsm}
-\end{equation}
-This variable captures microstructure effects: during low-activity periods, the mid-price can remain
-unchanged for extended durations, after which the next price change tends to be disproportionately large.
+\begin{remark}
+The use of the integrated seasonal denominator makes $\sigRel$ horizon-dependent: the same
+$\sigRv(t)$ yields different $\sigRel$ values for contracts with different remaining lives.
+This is deliberate---a contract expiring before a known volatility spike should have a different
+regime assessment than one expiring after it.
+\end{remark}
 
 \subsection{Parametric variance model}
 
-We combine the features into a parsimonious multiplicative variance forecast:
+We combine the features into a multiplicative variance forecast with state-dependent shrinkage:
 \begin{equation}
     \boxed{
-    v_t(\tau;\theta) = c^2 \;\cdot\; \sigTod(b_t)^2 \;\cdot\; \sigRel(t)^{2\beta}
-    \;\cdot\; \tau^{\alpha} \;\cdot\; \Gamma(\mathrm{tsm}_t),
+    v_t(\tau;\theta) = c^2 \;\cdot\; \sigTod(t,\tau)^2 \;\cdot\; \tau^{\alpha}
+    \;\cdot\; \bigl[\,m_t(\tau) + (1 - m_t(\tau))\,\sigRel(t,\tau)^{2}\,\bigr],
     }
     \label{eq:v_model}
 \end{equation}
-with parameter vector $\theta = (c, \beta, \alpha, \lambda)$ and the saturating staleness adjustment:
+where $\sigTod(t,\tau) \equiv \bar{\sigma}_{\mathrm{tod}}(t,\tau)$ is the integrated seasonal volatility
+\eqref{eq:sigma_tod_integrated}, and the \emph{shrinkage weight} $m_t(\tau) \in (0,1)$ is defined by:
 \begin{equation}
-    \Gamma(\mathrm{tsm}) := 1 + \lambda\left(1 - e^{-\mathrm{tsm}/\kappa}\right), \qquad \lambda \geq 0,
-    \label{eq:stale_adj}
+    \boxed{
+    m_t(\tau) := \sigma\!\bigl(k_0 + k_1 \ln\tau\bigr),
+    }
+    \label{eq:shrinkage}
 \end{equation}
-where $\kappa > 0$ is a fixed time constant (not fitted).
+with $\sigma(x) = 1/(1+e^{-x})$ the sigmoid function.
+The full parameter vector is $\theta = (c, \alpha, k_0, k_1)$.
 
-\begin{remark}[Interpretation of each component]
+\begin{remark}[Interpretation of the shrinkage factor]
 \label{rem:v_interpretation}
+\hfill
+
+The factor $f_t := m_t + (1 - m_t)\,\sigRel^{2}$ interpolates between two extremes:
+\begin{itemize}[nosep]
+    \item $m_t = 0$: Full regime pass-through. $f_t = \sigRel^{2}$, recovering the pure
+        power-law model.
+    \item $m_t = 1$: Full seasonal reversion. $f_t = 1$, so $v_t = c^2\,\sigTod^2\,\tau^\alpha$---the
+        model ignores $\sigRel$ entirely and prices from the seasonal curve alone.
+\end{itemize}
+The two sigmoid inputs control the shrinkage:
+\begin{itemize}[nosep]
+    \item $k_0$: Baseline shrinkage level.
+    \item $k_1 \ln\tau$: Horizon-dependent shrinkage. When $k_1 > 0$, longer horizons induce stronger
+        reversion to seasonal---consistent with the intuition that short-lived volatility spikes
+        matter less for longer-dated contracts.
+\end{itemize}
+This two-parameter form is deliberately parsimonious. The shrinkage depends only on the horizon
+$\tau$, not on $\sigRel$ itself, so that the regime signal enters the variance exclusively through
+the power-law $\sigRel^{2}$.
+\end{remark}
+
+\begin{remark}[Remaining components]
 \hfill
 \begin{itemize}[nosep]
     \item $c^2$: Overall variance scale. Absorbs systematic biases in the input estimators.
-    \item $\sigTod(b_t)^2$: Intraday seasonal pattern. Captures the $5$--$10\times$ variance ratio between
-        active and quiet periods.
-    \item $\sigRel(t)^{2\beta}$: Regime responsiveness. The exponent $\beta$ controls how strongly the model
-        reacts to deviations from the seasonal norm. The value $\beta = 1$ corresponds to full pass-through;
-        $\beta < 1$ provides shrinkage toward the seasonal level, which regularizes against transient
-        volatility spikes.
-    \item $\tau^{\alpha}$: Horizon scaling. For a pure diffusion with constant volatility, $\alpha = 1$
-        (variance is proportional to time). For mean-reverting volatility, $\alpha < 1$; for trending
-        volatility or regime switches within the hour, $\alpha > 1$. A single exponent parsimoniously
-        corrects systematic horizon mis-scaling.
-    \item $\Gamma(\mathrm{tsm}_t)$: Staleness uplift. During stale periods, the EWMA realized variance
-        $\sigRv$ can collapse toward zero because no price changes are observed, even though the true
-        hour-ahead variance remains supported by the accumulated probability of a large discrete move.
-        The factor $\Gamma$ prevents the variance forecast from becoming unrealistically small, saturating
-        at $1 + \lambda$ for large $\mathrm{tsm}$.
+    \item $\sigTod(t,\tau)^2$: Integrated intraday seasonal pattern. Captures the $5$--$10\times$
+        variance ratio between active and quiet periods, averaged over the contract's remaining life.
+    \item $\sigRel(t,\tau)^{2}$: Regime responsiveness. The squared term gives linear variance
+        response to deviations from the seasonal norm, modulated by the shrinkage weight.
+    \item $\tau^{\alpha}$: Horizon scaling. $\alpha = 1$ for a pure diffusion; $\alpha < 1$ for
+        mean-reverting volatility; $\alpha > 1$ for regime-switching or trending volatility.
 \end{itemize}
 \end{remark}
 
-\begin{remark}[Multiplicative versus additive form]
+\begin{remark}[Positivity and multiplicative structure]
 The multiplicative structure \eqref{eq:v_model} ensures that $v_t(\tau;\theta) > 0$ for all parameter
-values in the feasible region, without requiring explicit positivity constraints. It also implies that
-percentage errors in each component combine multiplicatively, which is the natural error model for
-ratio-scale quantities like variance.
+values in the feasible region, without requiring explicit positivity constraints. The shrinkage factor
+$f_t \in (0, \infty)$ is always positive since $m_t \in (0,1)$ and $\sigRel^{2} > 0$.
 \end{remark}
 
 \subsection{Calibration via the QLIKE scoring rule}
@@ -416,7 +461,7 @@ where $\hat{\theta}$ is the QLIKE minimizer. We call this the \emph{honest varia
 \begin{remark}[Why not binary log-loss for variance calibration?]
 \label{rem:why_not_logloss}
 Binary log-loss is a proper scoring rule for \emph{probabilities}, not for \emph{variances}. When
-$\sigEff$ parameters are fitted by minimizing binary log-loss, the optimizer can exploit the nonlinear
+variance parameters are fitted by minimizing binary log-loss, the optimizer can exploit the nonlinear
 map $v \mapsto p$ (through the Gaussian or Student-$t$ CDF) to improve probability predictions at the
 cost of systematic variance bias. Concretely, the optimizer may inflate $v$ in regimes where $k_t \approx 0$
 (near at-the-money), because a wider distribution assigns probability closer to 0.5, which has low binary
@@ -475,9 +520,12 @@ of low-dimensional state variables $X_i$ observable at time $t_i$:
 
 \begin{enumerate}[nosep]
     \item \textbf{Horizon:} $X = \tau$. Detects misspecification of the exponent $\alpha$ in $\tau^\alpha$.
-    \item \textbf{Time of day:} $X = b_t$. Detects residual seasonality not captured by $\sigTod$.
-    \item \textbf{Regime:} $X = \ln\sigRel$. Detects misspecification of $\beta$ or the EWMA half-life $H$.
-    \item \textbf{Microstructure:} $X = \mathrm{tsm}$. Detects underforecasting during stale periods.
+    \item \textbf{Regime:} $X = \sigRel$. Detects misspecification of the shrinkage parameters
+        $(k_0, k_1)$ or the EWMA half-life $H$.
+    \item \textbf{Staleness:} $X = \Delta t_{\mathrm{last}}$, the elapsed time (in seconds) since the
+        mid-price last changed. Detects whether stale-quote effects bias the variance forecast.
+    \item \textbf{Hour of day:} $X = h_t$ (Eastern Time). Detects residual seasonality not captured
+        by $\sigTod$.
 \end{enumerate}
 
 For each scalar diagnostic variable $X$, form equal-mass bins $B_1, \ldots, B_J$ and compute:
@@ -494,10 +542,11 @@ Each diagnostic failure should be addressed by adjusting a single structural par
 adding high-dimensional features:
 \begin{itemize}[nosep]
     \item $\E[u \mid \tau]$ drifts with $\tau$: adjust $\alpha$.
-    \item $\E[u \mid b_t]$ deviates by time of day: re-estimate or re-smooth $\sigTod$.
-    \item $\E[u \mid \sigRel]$ slopes: adjust $\beta$ or filter half-life $H$.
-    \item $\E[u \mid \mathrm{tsm}]$ rises for large $\mathrm{tsm}$: include $\Gamma(\mathrm{tsm})$
-          and fit $\lambda$.
+    \item $\E[u \mid \sigRel]$ slopes: adjust the shrinkage coefficients $(k_0, k_1)$
+        or filter half-life $H$.
+    \item $\E[u \mid \Delta t_{\mathrm{last}}]$ deviates: investigate EWMA decay behavior
+        during stale-quote periods.
+    \item $\E[u \mid h_t]$ deviates by hour of day: re-estimate or re-smooth $\sigTod$.
 \end{itemize}
 The guiding principle is parsimony: each conditional-bias failure points to a specific model
 mechanism, and the fix is a one-knob structural adjustment rather than an ex-post patch.
@@ -516,7 +565,7 @@ where we have used Assumption~\ref{ass:zero_drift} to set the mean to zero. The 
 \begin{equation}
     \boxed{
     p_t^{\mathrm{Gauss}} = \Phi\!\left(-\frac{k_t}{\sqrt{v_t(\tau)}}\right)
-    = \Phi\!\left(-\frac{\ln(K/S_t)}{\sigEff(t,\tau)\sqrt{\tau}}\right),
+    = \Phi\!\left(-\frac{\ln(K/S_t)}{\sqrt{v_t(\tau;\theta)}}\right),
     }
     \label{eq:p_gauss}
 \end{equation}
@@ -639,7 +688,7 @@ where $T_\nu$ is the CDF of $t_\nu$. Using the symmetry $T_\nu(-x) = 1 - T_\nu(x
 \begin{equation}
     \boxed{
     p_t^{(t)} = T_\nu\!\left(-\frac{k_t}{s(\nu)\sqrt{v_t(\tau)}}\right)
-    = T_\nu\!\left(-\frac{\ln(K/S_t)}{s(\nu)\,\sigEff(t,\tau)\sqrt{\tau}}\right).
+    = T_\nu\!\left(-\frac{\ln(K/S_t)}{s(\nu)\,\sqrt{v_t(\tau;\theta)}}\right).
     }
     \label{eq:p_student}
 \end{equation}
@@ -692,12 +741,12 @@ where $f_\nu$ is the standard $t_\nu$ density \eqref{eq:t_density}. The log-like
 \end{equation}
 where $w_i := z_i / s(\nu)$ is the rescaled residual. The maximum likelihood estimator is:
 \begin{equation}
-    \hat{\nu} = \arg\max_{\nu > \nu_{\min}} \ell(\nu).
+    \hat{\nu} = \arg\max_{\nu \in [3.01,\, 100]} \ell(\nu).
     \label{eq:nu_mle}
 \end{equation}
 
 \begin{remark}
-The constraint $\nu > \nu_{\min} = 3$ ensures that the variance of $t_\nu$ exists (required for the
+The lower bound $\nu_{\min} = 3.01$ ensures that the variance of $t_\nu$ exists (required for the
 variance-preserving scale) and that the kurtosis is finite (required for $\nu > 4$, though this is not
 strictly necessary for the pricer). The single parameter $\nu$ controls both the kurtosis and the tail
 decay rate, which is sufficient for a one-parameter shape extension.
@@ -866,13 +915,13 @@ creates an adversarial dynamic where improvements in binary log-loss can come fr
 
 \subsection{Stage 1 optimization}
 
-The QLIKE objective \eqref{eq:qlike_weighted} is minimized over $\theta = (c, \beta, \alpha, \lambda)$
-subject to box constraints:
+The QLIKE objective \eqref{eq:qlike_weighted} is minimized over
+$\theta = (c, \alpha, k_0, k_1)$ subject to box constraints:
 \begin{equation}
-    c \in [c_{\min}, c_{\max}], \quad
-    \beta \in [0, \beta_{\max}], \quad
-    \alpha \in [\alpha_{\min}, \alpha_{\max}], \quad
-    \lambda \in [0, \lambda_{\max}].
+    c \in [0.1,\, 3.0], \quad
+    \alpha \in [0.5,\, 1.5], \quad
+    k_0 \in [-10,\, 5], \quad
+    k_1 \in [-3,\, 3].
     \label{eq:box_constraints}
 \end{equation}
 We use L-BFGS-B \citep{byrd1995limited}, a quasi-Newton method for bound-constrained optimization,
@@ -882,14 +931,22 @@ which requires gradients. The gradient of the QLIKE loss for a single observatio
     = \left(1 - \frac{r_i^2}{\hat{v}_i}\right) \cdot \frac{1}{\hat{v}_i} \cdot \frac{\partial \hat{v}_i}{\partial \theta_j}.
     \label{eq:qlike_grad}
 \end{equation}
-Due to the multiplicative structure of \eqref{eq:v_model}, the partial derivatives $\partial \hat{v}_i / \partial \theta_j$
-are available in closed form:
+Write $B := \sigTod^2 \cdot \tau^\alpha$ (the ``base'' variance) and
+$f := m + (1-m)\,\sigRel^{2}$ (the shrinkage factor), so $v = c^2 B f$.
+The partial derivatives are:
 \begin{align}
     \frac{\partial v}{\partial c} &= \frac{2v}{c}, \label{eq:dv_dc} \\
-    \frac{\partial v}{\partial \beta} &= 2v \cdot \ln\sigRel, \label{eq:dv_dbeta} \\
-    \frac{\partial v}{\partial \alpha} &= v \cdot \ln\tau, \label{eq:dv_dalpha} \\
-    \frac{\partial v}{\partial \lambda} &= \frac{v}{\Gamma(\mathrm{tsm})} \cdot (1 - e^{-\mathrm{tsm}/\kappa}). \label{eq:dv_dlambda}
+    \frac{\partial v}{\partial \alpha} &= v \cdot \ln\tau. \label{eq:dv_dalpha}
 \end{align}
+For the shrinkage coefficients, let $P := \sigRel^{2}$ and note
+$\partial f / \partial k_j = (1 - P)\,m(1-m)\,\partial z / \partial k_j$, where
+$z = k_0 + k_1\ln\tau$. Then:
+\begin{equation}
+    \frac{\partial v}{\partial k_j} = c^2 B \cdot (1 - P)\,m(1-m) \cdot
+    \frac{\partial z}{\partial k_j}, \qquad j = 0,1,
+    \label{eq:dv_dk}
+\end{equation}
+with $\partial z / \partial k_0 = 1$ and $\partial z / \partial k_1 = \ln\tau$.
 
 \subsection{Stage 2 optimization}
 
@@ -919,22 +976,21 @@ The one-dimensional optimization can be solved efficiently by Brent's method or 
 Observations within the same market hour are not independent (they share the same terminal price $S_T$
 and are subject to common shocks). Standard errors must account for this clustering.
 
-Let $\ell_m(\theta) := \frac{1}{n_m}\sum_{i \in \mathcal{I}_m} L_i(\theta)$ denote the per-market
-contribution to the objective. The per-market gradient is:
+We use a cluster-level standard error that avoids Hessian computation. For any statistic of interest
+(e.g.\ $\bar{u}$ in a diagnostic bin, or a per-observation loss), let $\bar{x}_m$ denote the
+within-market mean for market $m$. The cluster-robust SE is:
 \begin{equation}
-    g_m := \nabla_\theta \ell_m(\theta)\big|_{\theta=\hat\theta}.
-\end{equation}
-Under standard regularity conditions, the cluster-robust variance estimator is:
-\begin{equation}
-    \widehat{\Var}(\hat\theta) = H^{-1}\left(\frac{M}{M-1}\sum_{m=1}^{M} g_m g_m^\top\right) H^{-1},
+    \mathrm{SE}_{\mathrm{cluster}} = \frac{\mathrm{sd}(\bar{x}_1, \ldots, \bar{x}_M)}{\sqrt{M}},
     \label{eq:cluster_var}
 \end{equation}
-where $H = \nabla^2_\theta \overline{\mathrm{QLIKE}}(\hat\theta)$ is the Hessian at the optimum. For the
-one-dimensional Stage~2, this simplifies to:
+where $\mathrm{sd}$ denotes the sample standard deviation with Bessel's correction. This treats each
+market hour as an independent observation, accounting for the within-market dependence induced by the
+shared terminal price $S_T$. For Stage~2, the same approach gives:
 \begin{equation}
     \mathrm{SE}(\hat\nu) = \frac{\mathrm{sd}(g_{1,\nu}, \ldots, g_{M,\nu})}{\sqrt{M}},
 \end{equation}
-where $g_{m,\nu} = \partial\ell_m/\partial\nu\big|_{\nu=\hat\nu}$.
+where $g_{m,\nu}$ is the per-market mean of the per-observation score $\partial\ell_i/\partial\nu$
+evaluated at $\nu = \hat\nu$.
 
 
 % ===================================================================
@@ -960,32 +1016,34 @@ probability output.
     \item \textbf{Feature construction.}
     \begin{enumerate}[nosep, label=(\alph*)]
         \item Compute tick-time returns and intervals \eqref{eq:tick_returns} from the BBO stream.
-        \item Estimate the seasonal curve $\sigTod(b)$ via \eqref{eq:sigma_day_bucket}--\eqref{eq:sigma_tod}
+        \item Estimate separate weekday and weekend seasonal curves $\sigTod^{\mathrm{wd}}(b)$,
+            $\sigTod^{\mathrm{we}}(b)$ via \eqref{eq:sigma_day_bucket}--\eqref{eq:sigma_tod}
             with circular smoothing.
-        \item Compute per-row $\sigRv(t)$ via \eqref{eq:sigma_rv} with chosen half-life $H$.
-        \item Compute per-row $\sigRel(t) = \sigRv(t)/\sigTod(b_t)$, $\mathrm{tsm}_t$, and $\tau$.
+        \item Compute per-row $\sigRv(t)$ via EWMA \eqref{eq:sigma_rv} with half-life $H$.
+        \item For each calibration row, compute integrated seasonal volatility
+            $\bar{\sigma}_{\mathrm{tod}}(t,\tau)$ via \eqref{eq:sigma_tod_integrated}
+            and $\sigRel(t,\tau) = \sigRv(t)/\bar{\sigma}_{\mathrm{tod}}(t,\tau)$.
     \end{enumerate}
 
     \item \textbf{Stage 1 calibration.}
     \begin{enumerate}[nosep, label=(\alph*)]
-        \item Fix $\kappa$ (staleness time constant).
-        \item Minimize market-weighted QLIKE \eqref{eq:qlike_weighted} over $\theta = (c, \beta, \alpha, \lambda)$
-            with box constraints.
+        \item Minimize market-weighted QLIKE \eqref{eq:qlike_weighted} over
+            $\theta = (c, \alpha, k_0, k_1)$ with box constraints.
         \item Compute variance forecasts $\hat{v}_i = v_{t_i}(\tau_i;\hat\theta)$ for all calibration rows.
     \end{enumerate}
 
     \item \textbf{Stage 1 diagnostics.}
     \begin{enumerate}[nosep, label=(\alph*)]
         \item Compute $u_i = r_i^2 / \hat{v}_i$.
-        \item Check $\E[u \mid X] \approx 1$ for $X \in \{\tau, b_t, \sigRel, \mathrm{tsm}\}$.
-        \item If diagnostics fail, iterate (adjust $\alpha$, re-smooth $\sigTod$, adjust $\beta$/$H$,
-            or include $\Gamma(\mathrm{tsm})$).
+        \item Check $\E[u \mid X] \approx 1$ for $X \in \{\tau, \sigRel, \Delta t_{\mathrm{last}}, h_t\}$.
+        \item If diagnostics fail, iterate (adjust $\alpha$, re-smooth $\sigTod$, adjust
+            shrinkage parameters $k_0, k_1$, or half-life $H$).
     \end{enumerate}
 
     \item \textbf{Stage 2 calibration.}
     \begin{enumerate}[nosep, label=(\alph*)]
         \item Compute standardized residuals $z_i = r_i / \sqrt{\hat{v}_i}$.
-        \item Maximize the Student-$t$ log-likelihood \eqref{eq:t_loglik} over $\nu \in [\nu_{\min}, \nu_{\max}]$.
+        \item Maximize the Student-$t$ log-likelihood \eqref{eq:t_loglik} over $\nu \in [3.01, 100]$.
         \item Store $\hat\nu$.
     \end{enumerate}
 
@@ -1003,11 +1061,16 @@ probability output.
 At each quote time $t$ with current mid-price $S_t$, strike $K$, and time to expiry $\tau$:
 
 \begin{enumerate}[nosep]
-    \item \textbf{Update features:} Compute $\sigRv(t)$, $\sigRel(t)$, and $\mathrm{tsm}_t$ from the
-        live tick stream.
-    \item \textbf{Look up seasonal:} Retrieve $\sigTod(b_t)$ from the pre-computed seasonal curve.
-    \item \textbf{Compute variance:} $\hat{v} = c^2 \cdot \sigTod(b_t)^2 \cdot \sigRel(t)^{2\beta}
-        \cdot \tau^\alpha \cdot \Gamma(\mathrm{tsm}_t)$.
+    \item \textbf{Update features:} Compute $\sigRv(t)$ from the live tick stream via EWMA
+        \eqref{eq:sigma_rv}.
+    \item \textbf{Integrate seasonal:} Compute $\bar{\sigma}_{\mathrm{tod}}(t,\tau)$ by
+        integrating the pre-computed seasonal curve over $[t, t+\tau]$
+        (weekday or weekend curve as appropriate).
+    \item \textbf{Regime level:} $\sigRel = \sigRv(t) / \bar{\sigma}_{\mathrm{tod}}(t,\tau)$.
+    \item \textbf{Shrinkage:} $m = \sigma(k_0 + k_1\ln\tau)$,
+        $f = m + (1-m)\,\sigRel^{2}$.
+    \item \textbf{Compute variance:} $\hat{v} = c^2 \cdot \bar{\sigma}_{\mathrm{tod}}^2
+        \cdot \tau^\alpha \cdot f$.
     \item \textbf{Compute log-strike:} $k = \ln(K/S_t)$.
     \item \textbf{Price (Gaussian):} $p = \Phi\!\left(-k / \sqrt{\hat{v}}\right)$.
     \item \textbf{Price (Student-$t$):} $p = T_{\hat\nu}\!\left(-k\, /\, [s(\hat\nu)\sqrt{\hat{v}}]\right)$.
@@ -1023,20 +1086,19 @@ The deployed model is monitored via three channels:
 
 \begin{enumerate}[nosep]
     \item \textbf{Scale monitor:} Rolling estimates of $\bar{u} = \E[u]$ and $\E[u \mid X]$ across
-        $(\tau, b_t, \sigRel, \mathrm{tsm})$. Detects when the variance model drifts out of calibration.
+        $(\tau, \sigRel, \Delta t_{\mathrm{last}}, h_t)$. Detects when the variance model drifts out of calibration.
     \item \textbf{Tail monitor:} Rolling exceedance rates $\hat{\Prob}(|z| > q)$ compared to
         Student-$t$ predictions. Detects when the tail parameter $\nu$ needs updating.
-    \item \textbf{Override knobs:} The parameters $(c, \beta, \alpha, \lambda, \nu)$ have interpretable
-        effects. In an emergency, a trader can:
+    \item \textbf{Override knobs:} The parameters $(c, \alpha, k_0, k_1, \nu)$
+        have interpretable effects. In an emergency, a trader can:
         \begin{itemize}[nosep]
             \item Increase $c$ to widen the variance forecast globally.
-            \item Decrease $\beta$ to reduce sensitivity to the regime estimate.
+            \item Increase $k_0$ to shrink more aggressively toward the seasonal baseline.
             \item Decrease $\nu$ to make tails heavier.
-            \item Increase $\lambda$ to boost variance during stale periods.
         \end{itemize}
         Because of the decoupling guarantee (Theorem~\ref{thm:decoupling}), adjusting $\nu$ does not
-        affect the variance forecast, and adjusting $(c, \beta, \alpha, \lambda)$ does not affect the
-        tail parameter.
+        affect the variance forecast, and adjusting $(c, \alpha, k_0, k_1)$ does not
+        affect the tail parameter.
 \end{enumerate}
 
 
@@ -1046,21 +1108,12 @@ The deployed model is monitored via three channels:
 
 \subsection{State-dependent degrees of freedom}
 
-The fixed-$\nu$ model applies uniform tail weight across all market conditions. If diagnostic evidence
-suggests that tail heaviness varies systematically (e.g.\ heavier tails during session transitions or
-stale periods), one may parameterize $\nu$ as a function of state variables:
-\begin{equation}
-    \eta(\mathbf{x}) = b_0 + \mathbf{b}^\top \mathbf{x}, \qquad
-    \nu(\mathbf{x}) = \nu_{\min} + \frac{\nu_{\max} - \nu_{\min}}{1 + e^{-\eta(\mathbf{x})}},
-    \label{eq:nu_state}
-\end{equation}
-where $\mathbf{x}$ is a vector of state features and the sigmoid ensures $\nu \in [\nu_{\min}, \nu_{\max}]$.
+The fixed-$\nu$ model applies uniform tail weight across all market conditions. One could parameterize
+$\nu$ as a function of state variables (e.g.\ via a sigmoid link to ensure $\nu \in [\nu_{\min}, \nu_{\max}]$).
 The variance-preserving property (Proposition~\ref{prop:var_preserve}) holds observation-by-observation
-for any $\nu_i > 2$, so the decoupling guarantee extends immediately.
-
-The parameters $(b_0, \mathbf{b}, \nu_{\max})$ are fitted by maximizing the Student-$t$ log-likelihood
-\eqref{eq:t_loglik} with $\nu$ replaced by $\nu_i = \nu(\mathbf{x}_i)$. The additional model complexity
-must be justified by improved out-of-sample tail coverage relative to the fixed-$\nu$ baseline.
+for any $\nu_i > 2$, so the decoupling guarantee would extend immediately. However, walk-forward
+cross-validation on BTC hourly data shows that the additional parameters provide no out-of-sample
+improvement over the scalar $\nu$ baseline, so we adopt the fixed-$\nu$ specification.
 
 \subsection{Alternative innovation distributions}
 
@@ -1113,14 +1166,20 @@ $r_{t,T} = \ln(S_T/S_t)$ & Terminal log-return \\
 $k_t = \ln(K/S_t)$ & Log-strike distance \\
 $p_t = \Prob(S_T > K \mid \F_t)$ & Binary option fair price \\
 \midrule
-$\sigTod(b)$ & Seasonal volatility curve \\
-$\sigRv(t)$ & Real-time EWMA realized volatility \\
-$\sigRel(t) = \sigRv/\sigTod$ & Relative regime level \\
-$\mathrm{tsm}_t$ & Time since last mid-price change \\
+$B$ & Number of TOD buckets (default $288$ for 5-minute buckets) \\
+$W$ & Smoothing half-width for $\sigTod$ (buckets; default $3$) \\
+$\sigTod(b)$ & Seasonal volatility curve (per bucket) \\
+$\bar{\sigma}_{\mathrm{tod}}(t,\tau)$ & Integrated seasonal vol over $[t, t+\tau]$ \\
+$\sigRv(t)$ & EWMA realized volatility \\
+$\sigRel(t,\tau) = \sigRv/\bar{\sigma}_{\mathrm{tod}}$ & Relative regime level \\
+$H$ & EWMA half-life (seconds; default $600$) \\
+$\Delta t_{\mathrm{last}}$ & Time since last mid-price change (seconds) \\
+$h_t$ & Hour of day (Eastern Time) \\
 \midrule
 $v_t(\tau;\theta)$ & Parametric variance forecast \\
-$c, \beta, \alpha, \lambda$ & Stage~1 parameters \\
-$\Gamma(\mathrm{tsm})$ & Staleness adjustment factor \\
+$c, \alpha$ & Variance scale, horizon exponent \\
+$k_0, k_1$ & Shrinkage parameters (baseline, horizon) \\
+$m_t(\tau)$ & State-dependent shrinkage weight \\
 $u_i = r_i^2 / \hat{v}_i$ & Normalized squared return (diagnostic) \\
 \midrule
 $\nu$ & Student-$t$ degrees of freedom (Stage~2) \\

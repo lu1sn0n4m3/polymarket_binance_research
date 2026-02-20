@@ -1,8 +1,8 @@
 """Two-stage calibration: volatility (QLIKE) + tails (fixed-nu Student-t LL).
 
 Paper workflow:
-  Stage 1:  QLIKE -> (c, beta, alpha)
-  Stage 2:  Fixed-nu MLE -> nu  (paper Section 6)
+  Stage 1: QLIKE -> (c, alpha, k0, k1) — shrinkage diffusion
+  Stage 2: Fixed-nu MLE -> nu  (paper Section 6)
 
 Usage:
     python pricing/run_calibration.py
@@ -17,14 +17,17 @@ from datetime import date
 from scipy.stats import norm, t as student_t
 
 from pricing.dataset import DatasetConfig, build_dataset
-from pricing.calibrate import calibrate_vol, calibrate_tail_fixed, log_loss
+from pricing.calibrate import (
+    calibrate_vol, calibrate_tail_fixed,
+    calibrate_tail_truncated, calibrate_tail_exceedance, log_loss,
+)
 from pricing.models import get_model
 from pricing.diagnostics import variance_ratio_diagnostics
 
 # =====================================================================
 # Build dataset
 # =====================================================================
-cfg = DatasetConfig(start_date=date(2026, 1, 19), end_date=date(2026, 2, 15))
+cfg = DatasetConfig(start_date=date(2026, 1, 19), end_date=date(2026, 2, 18))
 dataset = build_dataset(cfg)
 
 if dataset.empty:
@@ -32,10 +35,17 @@ if dataset.empty:
     sys.exit(1)
 
 # =====================================================================
-# Stage 1: Volatility calibration (QLIKE with analytic gradients)
+# Stage 1: Shrinkage diffusion (QLIKE)
 # =====================================================================
 model_gauss = get_model("gaussian")
-result_vol = calibrate_vol(model_gauss, dataset, objective="qlike", verbose=True)
+
+print("\n" + "="*60)
+print("STAGE 1: Shrinkage diffusion")
+print("="*60)
+result_vol = calibrate_vol(
+    model_gauss, dataset, objective="qlike",
+    verbose=True,
+)
 
 # =====================================================================
 # Stage 2: Fixed-nu tail calibration (paper Section 6)
@@ -70,6 +80,107 @@ print(f"  Gaussian (QLIKE vol): {ll_gauss:.6f}  ({(ll_baseline - ll_gauss)/ll_ba
 print(f"  Fixed-t (nu={nu:.1f}):    {ll_fixed:.6f}  ({(ll_baseline - ll_fixed)/ll_baseline*100:+.1f}%)")
 
 # =====================================================================
+# Stage 2 variants: tail-targeted nu estimation
+# =====================================================================
+print(f"\n{'='*60}")
+print(f"TAIL-TARGETED NU ESTIMATION")
+print(f"{'='*60}")
+
+# Collect all nu variants for comparison
+nu_variants = [("Full MLE", nu)]
+
+# Truncated MLE at various cutoffs
+for z0 in [1.0, 1.5, 2.0]:
+    model_t = get_model("fixed_t")
+    res_trunc = calibrate_tail_truncated(model_t, dataset, z_cutoff=z0, verbose=True)
+    if not np.isnan(res_trunc["nu"]):
+        nu_variants.append((f"Trunc z>{z0:.1f}", res_trunc["nu"]))
+
+# Exceedance matching at various thresholds
+for q in [1.5, 2.0, 2.5]:
+    model_t = get_model("fixed_t")
+    res_exc = calibrate_tail_exceedance(model_t, dataset, threshold=q, verbose=True)
+    nu_variants.append((f"Exc q={q:.1f}", res_exc["nu"]))
+
+# Compare all nu variants by |k| bins
+k_log = np.log(K / S)
+abs_k = np.abs(k_log)
+v_pred = model_fixed_t._variance(tau, features)
+sqrt_v = np.sqrt(np.maximum(v_pred, 1e-20))
+
+edges = [0, 0.001, 0.003, 0.005, 0.01, 0.02, 0.05, np.inf]
+labels_bin = ['0-0.1%', '0.1-0.3%', '0.3-0.5%', '0.5-1%', '1-2%', '2-5%', '>5%']
+
+def compute_ll_by_bins(nu_val):
+    """Compute per-bin log-loss for a given nu."""
+    s_nu = np.sqrt((nu_val - 2.0) / nu_val)
+    p = student_t.cdf(-k_log / (s_nu * sqrt_v), df=nu_val)
+    p = np.clip(p, 1e-9, 1 - 1e-9)
+    ll_row = -(y * np.log(p) + (1 - y) * np.log(1 - p))
+    bin_lls = []
+    for i in range(len(labels_bin)):
+        mask = (abs_k >= edges[i]) & (abs_k < edges[i+1])
+        bin_lls.append(ll_row[mask].mean() if mask.sum() > 0 else np.nan)
+    return bin_lls, ll_row.mean()
+
+# Gaussian baseline
+p_g = norm.cdf(-k_log / sqrt_v)
+p_g = np.clip(p_g, 1e-9, 1 - 1e-9)
+ll_g_row = -(y * np.log(p_g) + (1 - y) * np.log(1 - p_g))
+gauss_bins = []
+for i in range(len(labels_bin)):
+    mask = (abs_k >= edges[i]) & (abs_k < edges[i+1])
+    gauss_bins.append(ll_g_row[mask].mean() if mask.sum() > 0 else np.nan)
+
+print(f"\n{'='*60}")
+print(f"NU VARIANT COMPARISON BY |k| BINS")
+print(f"{'='*60}")
+
+# Header
+header = f"{'Method':>18s}  {'nu':>6s}  {'Total':>8s}"
+for lb in labels_bin:
+    header += f"  {lb:>8s}"
+print(header)
+print("-" * len(header))
+
+# Gaussian row
+row = f"{'Gaussian':>18s}  {'inf':>6s}  {ll_g_row.mean():>8.4f}"
+for v_b in gauss_bins:
+    row += f"  {v_b:>8.4f}" if not np.isnan(v_b) else f"  {'N/A':>8s}"
+print(row)
+
+# Each nu variant
+for name, nu_v in nu_variants:
+    bins_ll, total_ll = compute_ll_by_bins(nu_v)
+    row = f"{name:>18s}  {nu_v:>6.2f}  {total_ll:>8.4f}"
+    for v_b in bins_ll:
+        row += f"  {v_b:>8.4f}" if not np.isnan(v_b) else f"  {'N/A':>8s}"
+    print(row)
+
+# Delta vs Gaussian (positive = t is better)
+print(f"\nDelta vs Gaussian (positive = t helps):")
+header_d = f"{'Method':>18s}  {'nu':>6s}  {'Total':>8s}"
+for lb in labels_bin:
+    header_d += f"  {lb:>8s}"
+print(header_d)
+print("-" * len(header_d))
+
+for name, nu_v in nu_variants:
+    bins_ll, total_ll = compute_ll_by_bins(nu_v)
+    row = f"{name:>18s}  {nu_v:>6.2f}  {ll_g_row.mean() - total_ll:>+8.4f}"
+    for gb, tb in zip(gauss_bins, bins_ll):
+        d = gb - tb if not (np.isnan(gb) or np.isnan(tb)) else np.nan
+        row += f"  {d:>+8.4f}" if not np.isnan(d) else f"  {'N/A':>8s}"
+    print(row)
+
+# Bin counts
+row_n = f"{'N':>18s}  {'':>6s}  {len(y):>8,}"
+for i in range(len(labels_bin)):
+    mask = (abs_k >= edges[i]) & (abs_k < edges[i+1])
+    row_n += f"  {mask.sum():>8,}"
+print(row_n)
+
+# =====================================================================
 # Diagnostic plot
 # =====================================================================
 v_pred = model_fixed_t._variance(tau, features)
@@ -99,19 +210,18 @@ ax.set_ylabel("E[u | tau]")
 ax.set_title("E[u | tau]  (target: 1.0)")
 ax.set_ylim(0.5, 1.5)
 
-# Panel 2: E[u|tsm] — variance ratio by staleness
+# Panel 2: E[u|sigma_rel] — variance ratio by relative vol
 ax = axes[0, 1]
-if "tsm" in eu_results:
-    bins = eu_results["tsm"]
+if "sigma_rel" in eu_results:
+    bins = eu_results["sigma_rel"]
     x_vals = [b["mean_x"] for b in bins]
     y_vals = [b["mean_u"] for b in bins]
     se_vals = [1.96 * b["se_u"] for b in bins]
     ax.errorbar(x_vals, y_vals, yerr=se_vals, fmt="o-", color=c_t, markersize=5, capsize=3)
 ax.axhline(1.0, color="k", ls="--", lw=1)
-ax.set_xlabel("time_since_move (seconds)")
-ax.set_ylabel("E[u | tsm]")
-ax.set_title("E[u | tsm]  (target: 1.0)")
-ax.set_xscale("symlog", linthresh=10)
+ax.set_xlabel("sigma_rel")
+ax.set_ylabel("E[u | sigma_rel]")
+ax.set_title("E[u | sigma_rel]  (target: 1.0)")
 ax.set_ylim(0.5, 1.5)
 
 # Panel 3: QQ plot
@@ -149,19 +259,19 @@ ax.set_title("Tail Coverage")
 ax.legend(fontsize=8)
 ax.grid(True, alpha=0.3)
 
-# Panel 5: E[u|sigma_rel]
+# Panel 5: E[u|hour_et]
 ax = axes[1, 1]
-if "sigma_rel" in eu_results:
-    bins = eu_results["sigma_rel"]
+if "hour_et" in eu_results:
+    bins = eu_results["hour_et"]
     x_vals = [b["mean_x"] for b in bins]
     y_vals = [b["mean_u"] for b in bins]
     se_vals = [1.96 * b["se_u"] for b in bins]
     ax.errorbar(x_vals, y_vals, yerr=se_vals, fmt="o-", color=c_t, markersize=5, capsize=3)
 ax.axhline(1.0, color="k", ls="--", lw=1)
-ax.set_xlabel("sigma_rel")
-ax.set_ylabel("E[u | sigma_rel]")
-ax.set_title("E[u | sigma_rel]  (target: 1.0)")
-ax.set_ylim(0.5, 1.5)
+ax.set_xlabel("Hour (ET)")
+ax.set_ylabel("E[u | hour]")
+ax.set_title("E[u | hour_et]  (target: 1.0)")
+ax.set_ylim(0.0, 2.0)
 
 # Panel 6: Summary table
 ax = axes[1, 2]
@@ -174,7 +284,8 @@ stats = [
      f"{(ll_baseline-ll_gauss)/ll_baseline*100:+.1f}%",
      f"{(ll_baseline-ll_fixed)/ll_baseline*100:+.1f}%"],
     ["", "", ""],
-    ["Vol params", "c,beta,alpha", "(frozen)"],
+    ["Vol params", "c,alpha", "(frozen)"],
+    ["Shrinkage", "k0,k1", "(frozen)"],
     ["Tail params", "(none)", f"nu={nu:.1f}"],
     ["", "", ""],
     ["std(z)", f"{np.std(z):.4f}", ""],

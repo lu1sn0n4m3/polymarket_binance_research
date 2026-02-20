@@ -115,6 +115,18 @@ def equal_mass_reliability(p_pred: np.ndarray, y: np.ndarray, n_bins: int = 20):
     return np.array(bin_pred), np.array(bin_actual), np.array(bin_se), np.array(bin_n)
 
 
+def _inject_vol_params(model, all_params):
+    """For fixed_t: inject vol params into model, return predict-only params.
+    For gaussian: no-op, return all_params unchanged."""
+    if hasattr(model, 'c'):  # fixed_t stores vol params as attrs
+        model.c = all_params["c"]
+        model.alpha = all_params["alpha"]
+        model.k0 = all_params["k0"]
+        model.k1 = all_params["k1"]
+        return {"nu": all_params["nu"]}
+    return all_params
+
+
 # ---------------------------------------------------------------------------
 # Data loading (cached)
 # ---------------------------------------------------------------------------
@@ -281,22 +293,45 @@ def _dataset_arrays(model: Model, params: dict, dataset: pd.DataFrame):
 
 def render_calibration_view(model: Model, params: dict, dataset: pd.DataFrame):
     """View 1 — model-only calibration diagnostics."""
-    _, _, tau, y, _, p_pred, tau_min, sigma_rel = _dataset_arrays(model, params, dataset)
+    S, K, tau, y, feats, p_pred, tau_min, sigma_rel = _dataset_arrays(model, params, dataset)
 
     ll = log_loss(y, p_pred)
     ll_baseline = log_loss(y, np.full_like(y, y.mean()))
     improvement = (ll_baseline - ll) / ll_baseline * 100
     n_markets = dataset["market_id"].nunique() if "market_id" in dataset.columns else 0
 
-    # Metrics
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Log Loss", f"{ll:.4f}")
-    c2.metric("Baseline", f"{ll_baseline:.4f}")
-    c3.metric("Improvement", f"{improvement:+.1f}%")
-    c4.metric("Samples", f"{len(y):,} / {n_markets} mkts")
+    # Metrics — adapt layout to model type
+    if model.name == "fixed_t":
+        # Gaussian comparison (same variance, normal CDF instead of t)
+        var_pred = model.predict_variance(params, S, K, tau, feats)
+        k_log = np.log(K / S)
+        sqrt_v = np.sqrt(np.maximum(var_pred, 1e-20))
+        p_gauss = np.clip(norm.cdf(-k_log / sqrt_v), 1e-9, 1 - 1e-9)
+        ll_gauss = log_loss(y, p_gauss)
+        imp_gauss = (ll_baseline - ll_gauss) / ll_baseline * 100
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Fixed-t LL", f"{ll:.4f}", delta=f"{improvement:+.1f}% vs base")
+        c2.metric("Gaussian LL", f"{ll_gauss:.4f}", delta=f"{imp_gauss:+.1f}% vs base")
+        c3.metric("t vs Gauss", f"{ll - ll_gauss:+.4f}",
+                  delta="t helps" if ll < ll_gauss else "Gauss wins",
+                  delta_color="normal" if ll < ll_gauss else "inverse")
+        c4.metric("Baseline", f"{ll_baseline:.4f}")
+        c5.metric("Samples", f"{len(y):,} / {n_markets} mkts")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Log Loss", f"{ll:.4f}", delta=f"{improvement:+.1f}% vs base")
+        c2.metric("Baseline", f"{ll_baseline:.4f}")
+        c3.metric("Samples", f"{len(y):,} / {n_markets} mkts")
 
     with st.expander("Fitted parameters"):
-        param_df = pd.DataFrame({"Parameter": list(params.keys()), "Value": list(params.values())})
+        display = dict(params)
+        # For fixed_t, vol params live on model object, not in params dict
+        for attr in ["c", "alpha", "k0", "k1"]:
+            if attr not in display and hasattr(model, attr):
+                display[attr] = getattr(model, attr)
+        ordered = {k: display[k] for k in ["c", "alpha", "k0", "k1", "nu"] if k in display}
+        param_df = pd.DataFrame({"Parameter": list(ordered.keys()), "Value": list(ordered.values())})
         st.dataframe(param_df, width="stretch", hide_index=True)
 
     # ===== 2x3 diagnostic grid =====
@@ -935,18 +970,40 @@ st.title("Binary Option Pricing Dashboard")
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Fixed-t Model")
-    model_name = "fixed_t"
-    model = get_model(model_name)
+    st.header("Pricing Model")
+    model_name = st.radio(
+        "Distribution", ["gaussian", "fixed_t"],
+        format_func={"gaussian": "Gaussian (Phi)", "fixed_t": "Student-t (T_nu)"}.get,
+        horizontal=True,
+    )
 
-    # Load cached params
-    cached_params = load_cached_params(model_name)
-    has_params = cached_params is not None
+    # Load calibrated params from both stages
+    vol_raw = load_cached_params("gaussian_vol")
+    tail_raw = load_cached_params("fixed_t")
+    has_vol = vol_raw is not None
+    has_t = tail_raw is not None
+
+    # fixed_t needs vol params JSON to instantiate
+    if model_name == "fixed_t" and not has_vol:
+        st.warning("Run calibration first (need Stage 1 vol params).")
+        model_name = "gaussian"
+
+    model = get_model(model_name)
+    has_params = has_vol if model_name == "gaussian" else (has_vol and has_t)
 
     if has_params:
-        neg_t_ll = cached_params.get("neg_t_ll", 0)
-        nu = cached_params.get("nu", 0)
-        st.success(f"Calibrated: neg_t_LL={neg_t_ll:.3f}, nu={nu:.1f}")
+        calibrated_all = {
+            "c": vol_raw["c"], "alpha": vol_raw["alpha"],
+            "k0": vol_raw.get("k0", -100.0), "k1": vol_raw.get("k1", 0.0),
+        }
+        if model_name == "fixed_t":
+            calibrated_all["nu"] = tail_raw["nu"]
+
+        c_val, a_val = calibrated_all["c"], calibrated_all["alpha"]
+        if model_name == "gaussian":
+            st.success(f"c={c_val:.3f}  alpha={a_val:.3f}  (4 params)")
+        else:
+            st.success(f"c={c_val:.3f}  alpha={a_val:.3f}  nu={calibrated_all['nu']:.2f}")
     else:
         st.warning("Not calibrated yet")
 
@@ -1001,37 +1058,48 @@ with st.sidebar:
         st.divider()
         st.subheader("Parameters")
 
-        calibrated = {k: cached_params[k] for k in model.param_names() if k in cached_params}
-        bounds = model.param_bounds()
+        all_param_names = ["c", "alpha", "k0", "k1"]
+        if model_name == "fixed_t":
+            all_param_names.append("nu")
 
-        # Initialize session state on first load
-        if not st.session_state.get("_params_initialized"):
-            st.session_state["_params_initialized"] = True
-            for pname in model.param_names():
-                st.session_state[f"p_{pname}"] = calibrated.get(pname, model.initial_params()[pname])
+        all_bounds = {
+            "c": (0.1, 3.0), "alpha": (0.5, 1.5),
+            "k0": (-10.0, 5.0), "k1": (-3.0, 3.0),
+            "nu": (3.01, 100.0),
+        }
 
-        # Reset must happen BEFORE sliders are created (can't modify widget keys after)
+        # Initialize missing slider state
+        for pname in all_param_names:
+            if f"p_{pname}" not in st.session_state:
+                st.session_state[f"p_{pname}"] = calibrated_all[pname]
+
+        # Reset must happen BEFORE sliders are created
         if st.session_state.get("_reset_params"):
             st.session_state["_reset_params"] = False
-            for pname in model.param_names():
-                st.session_state[f"p_{pname}"] = calibrated.get(pname, model.initial_params()[pname])
+            for pname in all_param_names:
+                st.session_state[f"p_{pname}"] = calibrated_all[pname]
 
         slider_params = {}
-        for pname in model.param_names():
-            lo, hi = bounds[pname]
-            step = (hi - lo) / 500
+
+        st.caption("Variance (QLIKE)")
+        for pname in ["c", "alpha", "k0", "k1"]:
+            lo, hi = all_bounds[pname]
             slider_params[pname] = st.slider(
-                pname,
-                min_value=float(lo),
-                max_value=float(hi),
-                step=step,
-                format="%.4f",
-                key=f"p_{pname}",
+                pname, min_value=float(lo), max_value=float(hi),
+                step=(hi - lo) / 500, format="%.4f", key=f"p_{pname}",
+            )
+
+        if model_name == "fixed_t":
+            st.caption("Tails (MLE)")
+            lo, hi = all_bounds["nu"]
+            slider_params["nu"] = st.slider(
+                "nu", min_value=float(lo), max_value=float(hi),
+                step=0.1, format="%.1f", key="p_nu",
             )
 
         params_changed = any(
-            abs(slider_params[p] - calibrated.get(p, 0)) > 1e-8
-            for p in model.param_names()
+            abs(slider_params[p] - calibrated_all[p]) > 1e-8
+            for p in all_param_names
         )
 
         if params_changed:
@@ -1050,19 +1118,33 @@ with st.sidebar:
                 tau_ds = dataset["tau"].values.astype(np.float64)
                 y_ds = dataset["y"].values.astype(np.float64)
                 feats_ds = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
-                p_ds = model.predict(slider_params, S_ds, K_ds, tau_ds, feats_ds)
+
+                pred_p = _inject_vol_params(model, slider_params)
+                p_ds = model.predict(pred_p, S_ds, K_ds, tau_ds, feats_ds)
                 ll_slider = log_loss(y_ds, p_ds)
-                # Compare against calibrated params
-                p_cal = model.predict(calibrated, S_ds, K_ds, tau_ds, feats_ds)
+
+                cal_p = _inject_vol_params(model, calibrated_all)
+                p_cal = model.predict(cal_p, S_ds, K_ds, tau_ds, feats_ds)
                 ll_cal = log_loss(y_ds, p_cal)
+
                 st.metric("Dataset LL", f"{ll_slider:.4f}", delta=f"{ll_slider - ll_cal:+.4f}", delta_color="inverse")
 
 # ---------------------------------------------------------------------------
 # Main content
 # ---------------------------------------------------------------------------
-active_params = slider_params if slider_params else (
-    {k: cached_params[k] for k in model.param_names()} if has_params else None
-)
+# Resolve all_params (slider values take priority over calibrated)
+# Then inject vol params for fixed_t, or pass through for gaussian
+if slider_params:
+    all_params = slider_params
+elif has_params:
+    all_params = dict(calibrated_all)
+else:
+    all_params = None
+
+if all_params is not None:
+    active_params = _inject_vol_params(model, all_params)
+else:
+    active_params = None
 
 if view_mode == "Calibration":
     if not has_params:

@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from pricing.features.seasonal_vol import SeasonalVolCurve, compute_seasonal_vol
+from pricing.features.seasonal_vol import SeasonalVolCurve, compute_seasonal_vol, compute_seasonal_vol_split
 from pricing.features.realized_vol import compute_rv_ewma
 
 _ET = ZoneInfo("America/New_York")
@@ -34,7 +34,7 @@ class DatasetConfig:
     tod_bucket_minutes: int = 5
     tod_smoothing_window: int = 3
     sigma_tod_floor: float = 1e-10
-    ewma_half_life_sec: float = 60.0
+    ewma_half_life_sec: float = 600.0
     start_hour: int = 0
     end_hour: int = 23
     output_dir: str = "pricing/output"
@@ -75,27 +75,28 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
         print("No labels found.")
         return pd.DataFrame()
 
-    # Step 3: Compute seasonal volatility
-    print("Computing seasonal volatility ...")
-    seasonal = compute_seasonal_vol(
+    # Step 3: Compute seasonal volatility (weekday/weekend split)
+    print("Computing seasonal volatility (weekday/weekend split) ...")
+    seasonal = compute_seasonal_vol_split(
         bbo,
         bucket_minutes=cfg.tod_bucket_minutes,
         smoothing_window=cfg.tod_smoothing_window,
         floor=cfg.sigma_tod_floor,
     )
-    print(f"  {seasonal.n_buckets} TOD buckets, median sigma_tod = {np.median(seasonal.sigma_tod):.2e}")
+    print(f"  {seasonal.n_buckets} TOD buckets")
 
-    # Save seasonal vol for downstream use
-    seasonal_df = pd.DataFrame({
-        "bucket": np.arange(seasonal.n_buckets),
-        "sigma_tod": seasonal.sigma_tod,
-    })
-    seasonal_df.to_parquet(output_dir / "seasonal_vol.parquet", index=False)
+    # Save seasonal vol curves for downstream use (pricer)
+    for label, curve in [("weekday", seasonal.weekday), ("weekend", seasonal.weekend)]:
+        df_sv = pd.DataFrame({
+            "bucket": np.arange(curve.n_buckets),
+            "sigma_tod": curve.sigma_tod,
+        })
+        df_sv.to_parquet(output_dir / f"seasonal_vol_{label}.parquet", index=False)
 
     # Step 4: Compute EWMA realized vol
     print(f"Computing EWMA sigma_rv (H={cfg.ewma_half_life_sec}s) ...")
     ts_rv, sigma_rv_full = compute_rv_ewma(
-        bbo, seasonal_vol=seasonal, half_life_sec=cfg.ewma_half_life_sec,
+        bbo, half_life_sec=cfg.ewma_half_life_sec,
     )
     print(f"  {len(ts_rv):,} tick-time sigma_rv values")
 
@@ -229,6 +230,20 @@ def build_dataset(cfg: DatasetConfig) -> pd.DataFrame:
         print(f"  Polymarket: {pm_hit} markets matched, {pm_miss} missing")
 
     dataset = pd.DataFrame(rows)
+
+    # Recompute sigma_tod as integrated remaining seasonal vol (not point estimate).
+    # This captures the volatility profile over [t, T] — e.g. pricing in an
+    # upcoming NY-open spike even when the current bucket is still quiet.
+    if not dataset.empty:
+        avg_var = seasonal.integrated_variance_array(
+            dataset["t"].values, dataset["tau"].values,
+        )
+        dataset["sigma_tod"] = np.sqrt(avg_var)
+        dataset["sigma_rel"] = (
+            dataset["sigma_rv"].values
+            / np.maximum(dataset["sigma_tod"].values, 1e-12)
+        )
+
 
     # Drop rows with NaN or inf in any feature column
     feature_cols = ["S", "K", "S_T", "sigma_tod", "sigma_rv", "sigma_rel"]

@@ -29,8 +29,9 @@ def _make_fixed_t(vol_params):
     """Create FixedTModel with injected vol params (bypass JSON loading)."""
     m = object.__new__(FixedTModel)
     m.c = vol_params["c"]
-    m.beta = vol_params["beta"]
     m.alpha = vol_params["alpha"]
+    m.k0 = vol_params.get("k0", -100.0)
+    m.k1 = vol_params.get("k1", 0.0)
     return m
 
 
@@ -187,7 +188,7 @@ def run_cv():
     print(f"{'='*70}")
 
     print(f"\n  Vol params (Stage 1):")
-    for k in ["c", "beta", "alpha"]:
+    for k in ["c", "alpha"]:
         vals = np.array(vol_params_history[k])
         print(f"    {k:6s}: mean={np.mean(vals):+.4f}  std={np.std(vals):.4f}  "
               f"range=[{np.min(vals):+.4f}, {np.max(vals):+.4f}]  "
@@ -257,8 +258,8 @@ def run_cv():
 
     # Panel 4: Vol parameter trajectories
     ax = axes[1, 0]
-    colors_p = ["#e74c3c", "#2980b9", "#27ae60", "#8e44ad"]
-    for i, k in enumerate(["c", "beta", "alpha", "lam"]):
+    colors_p = ["#e74c3c", "#2980b9", "#27ae60"]
+    for i, k in enumerate(["c", "alpha", "k0"]):
         vals = np.array(vol_params_history[k])
         ax.plot(range(len(vals)), vals, "o-", ms=3, color=colors_p[i], label=k)
     ax.set_xlabel("Fold")
@@ -296,7 +297,7 @@ def run_cv():
         ["", "", ""],
         ["Full-sample", f"{ll_full_gauss:.4f}", f"{ll_full_fixed:.4f}"],
         ["Full vs base", "",  f"{imp_full:+.1f}%"],
-        ["N params", "4", "4+1"],
+        ["N params", "4", "4+1"],  # c, alpha, k0, k1 + nu
     ]
     table = ax.table(cellText=rows, loc="center", cellLoc="center")
     table.auto_set_font_size(False)

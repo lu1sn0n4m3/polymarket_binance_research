@@ -55,6 +55,59 @@ class SeasonalVolCurve:
         buckets = ((hours * 60 + minutes) // self.bucket_minutes).astype(int)
         return self.sigma_tod[buckets]
 
+    def integrated_variance_array(
+        self, t_ms: np.ndarray, tau_sec: np.ndarray,
+    ) -> np.ndarray:
+        """Average variance per second over [t, t+tau] for each observation.
+
+        Computes (1/tau) * integral_t^{t+tau} sigma_tod(s)^2 ds by summing
+        sigma_tod[b]^2 * overlap_seconds across the 5-min buckets that span
+        the remaining life.
+
+        Args:
+            t_ms: Observation timestamps (epoch ms), shape (N,).
+            tau_sec: Time to expiry in seconds, shape (N,).
+
+        Returns:
+            Average variance per second, shape (N,). Take sqrt for sigma units.
+        """
+        bucket_sec = self.bucket_minutes * 60  # 300
+        n_bkt = self.n_buckets  # 288
+        sigma_sq = self.sigma_tod ** 2  # (288,)
+
+        t_ms = np.asarray(t_ms, dtype=np.int64)
+        tau_sec = np.asarray(tau_sec, dtype=np.float64)
+        N = len(t_ms)
+
+        start_sec = ((t_ms // 1000) % 86400).astype(np.float64)  # second of day
+        end_sec = start_sec + tau_sec
+
+        # First bucket index and where it ends (in absolute seconds of day)
+        first_bucket = np.floor(start_sec / bucket_sec).astype(np.int64)
+        first_bucket_end_sec = (first_bucket + 1) * bucket_sec
+
+        # Accumulate: sigma_sq[b] * overlap for each bucket in [t, t+tau]
+        integrated = np.zeros(N, dtype=np.float64)
+        remaining = tau_sec.copy()
+
+        # First (partial) bucket
+        overlap = np.minimum(first_bucket_end_sec - start_sec, remaining)
+        overlap = np.maximum(overlap, 0.0)
+        integrated += overlap * sigma_sq[first_bucket % n_bkt]
+        remaining -= overlap
+
+        # Subsequent buckets (at most 12 more for tau <= 3600, bucket = 300)
+        for offset in range(1, 14):
+            mask = remaining > 0
+            if not mask.any():
+                break
+            b_idx = (first_bucket + offset) % n_bkt
+            contrib = np.where(mask, np.minimum(remaining, bucket_sec), 0.0)
+            integrated += contrib * sigma_sq[b_idx]
+            remaining -= contrib
+
+        return integrated / np.maximum(tau_sec, 1e-6)
+
 
 def compute_seasonal_vol(
     bbo: pd.DataFrame,
@@ -172,3 +225,72 @@ def compute_seasonal_vol(
         sigma_tod = np.maximum(sigma_tod, floor)
 
     return SeasonalVolCurve(bucket_minutes=bucket_minutes, sigma_tod=sigma_tod)
+
+
+def _is_weekend_ms(t_ms: np.ndarray) -> np.ndarray:
+    """Vectorized weekend detection from epoch ms (UTC).
+
+    Returns bool array: True for Saturday/Sunday.
+    1970-01-01 was a Thursday (weekday=3 in Mon=0 convention).
+    """
+    days = np.asarray(t_ms, dtype=np.int64) // 86_400_000
+    dow = (days + 3) % 7  # 0=Mon ... 6=Sun
+    return dow >= 5
+
+
+class WeekdayWeekendSeasonalVol:
+    """Dispatches sigma_tod lookups based on weekday vs weekend."""
+
+    def __init__(
+        self,
+        weekday_curve: SeasonalVolCurve,
+        weekend_curve: SeasonalVolCurve,
+    ):
+        self.weekday = weekday_curve
+        self.weekend = weekend_curve
+        self.bucket_minutes = weekday_curve.bucket_minutes
+
+    @property
+    def n_buckets(self) -> int:
+        return self.weekday.n_buckets
+
+    def lookup_array(self, t_ms: np.ndarray) -> np.ndarray:
+        t_ms = np.asarray(t_ms, dtype=np.int64)
+        wknd = _is_weekend_ms(t_ms)
+        result = self.weekday.lookup_array(t_ms)
+        if wknd.any():
+            result[wknd] = self.weekend.lookup_array(t_ms[wknd])
+        return result
+
+    def integrated_variance_array(
+        self, t_ms: np.ndarray, tau_sec: np.ndarray,
+    ) -> np.ndarray:
+        t_ms = np.asarray(t_ms, dtype=np.int64)
+        tau_sec = np.asarray(tau_sec, dtype=np.float64)
+        wknd = _is_weekend_ms(t_ms)
+        result = self.weekday.integrated_variance_array(t_ms, tau_sec)
+        if wknd.any():
+            result[wknd] = self.weekend.integrated_variance_array(
+                t_ms[wknd], tau_sec[wknd],
+            )
+        return result
+
+
+def compute_seasonal_vol_split(
+    bbo: pd.DataFrame,
+    ts_col: str = "ts_recv",
+    **kwargs,
+) -> WeekdayWeekendSeasonalVol:
+    """Compute separate weekday/weekend seasonal vol curves."""
+    ts = bbo[ts_col].values
+    wknd = _is_weekend_ms(ts)
+
+    weekday_curve = compute_seasonal_vol(bbo[~wknd], ts_col=ts_col, **kwargs)
+    weekend_curve = compute_seasonal_vol(bbo[wknd], ts_col=ts_col, **kwargs)
+
+    n_wd = (~wknd).sum()
+    n_we = wknd.sum()
+    print(f"  Weekday: {n_wd:,} rows, median sigma_tod = {np.median(weekday_curve.sigma_tod):.2e}")
+    print(f"  Weekend: {n_we:,} rows, median sigma_tod = {np.median(weekend_curve.sigma_tod):.2e}")
+
+    return WeekdayWeekendSeasonalVol(weekday_curve, weekend_curve)

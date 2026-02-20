@@ -1,0 +1,72 @@
+Dataset: 40,010 rows, 671 markets
+Base rate: 0.4640
+
+============================================================
+REFERENCE: Log-loss at different confidence levels
+============================================================
+  If true p is always 0.50 (coin flip):  LL = 0.6931
+  If true p is always 0.55 (or 0.45): LL = 0.6881
+  If true p is always 0.60 (or 0.40): LL = 0.6730
+  If true p is always 0.65 (or 0.35): LL = 0.6474
+  If true p is always 0.70 (or 0.30): LL = 0.6109
+  If true p is always 0.75 (or 0.25): LL = 0.5623
+  If true p is always 0.80 (or 0.20): LL = 0.5004
+  If true p is always 0.85 (or 0.15): LL = 0.4227
+  If true p is always 0.90 (or 0.10): LL = 0.3251
+  If true p is always 0.95 (or 0.05): LL = 0.1985
+  If true p is always 0.99 (or 0.01): LL = 0.0560
+
+============================================================
+YOUR MODEL'S PREDICTION DISTRIBUTION
+============================================================
+  Model log-loss:           0.4549
+  Avg entropy of preds:     0.4612
+  (If perfectly calibrated, LL = avg entropy of true probs)
+
+  Predicted probability distribution:
+     p < 0.05 (deep OTM):  10.4%  (avg entropy=0.073, avg LL=0.043)
+     0.05-0.20:  12.2%  (avg entropy=0.361, avg LL=0.270)
+     0.20-0.40:  17.3%  (avg entropy=0.607, avg LL=0.581)
+     0.40-0.60 (near ATM):  22.6%  (avg entropy=0.687, avg LL=0.687)
+     0.60-0.80:  17.0%  (avg entropy=0.609, avg LL=0.651)
+     0.80-0.95:  10.8%  (avg entropy=0.362, avg LL=0.421)
+     p > 0.95 (deep ITM):   9.8%  (avg entropy=0.071, avg LL=0.058)
+
+============================================================
+WHERE THE MODEL HAS EDGE vs WHERE IT DOESN'T
+============================================================
+  |k| distribution (log-strike distance):
+    |k| < 0.1% (very ATM):  32.6% of data, avg LL=0.649, entropy=0.653
+    0.1-0.3%:  35.6% of data, avg LL=0.488, entropy=0.480
+    0.3-1.0%:  25.9% of data, avg LL=0.241, entropy=0.275
+    1.0-3.0%:   5.7% of data, avg LL=0.106, entropy=0.109
+    3.0-10%:   0.1% of data, avg LL=0.867, entropy=0.070
+
+  By time to expiry:
+    tau 0-5 min:   6.7% of data, avg LL=0.109, entropy=0.112
+    tau 5-15 min:  16.7% of data, avg LL=0.224, entropy=0.260
+    tau 15-30 min:  25.1% of data, avg LL=0.395, entropy=0.423
+    tau 30-60 min:  50.2% of data, avg LL=0.602, entropy=0.588
+
+============================================================
+SUMMARY: HOW GOOD IS YOUR MODEL?
+============================================================
+  Coin flip (know nothing):    LL = 0.6931
+  Your baseline (const rate):  LL = 0.6906
+  Your model (fixed-t):        LL = 0.4549
+  Avg prediction entropy:      LL = 0.4612
+
+  Information gained vs baseline: 0.2357 nats
+  That's 34.0% of total entropy
+
+  Average |p - 0.5|: 0.2615
+  Equivalent avg edge per even-odds bet: 52.3%
+
+  Thought experiment — perfect volatility oracle:
+  68% of observations are within 0.3% of the strike
+  These observations are fundamentally hard to predict (true p ≈ 0.5)
+  They contribute ~0.562 to LL each
+  vs deep OTM/ITM contributing ~0.244 each
+
+  Bottom line: your dataset's theoretical floor is probably ~0.35-0.40
+  Your model at 0.4549 is capturing most of what's capturable.

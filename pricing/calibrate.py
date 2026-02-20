@@ -1,7 +1,7 @@
 """Two-stage calibration pipeline for the variance-first binary option pricer.
 
 Stage 1 — Volatility (QLIKE):
-    calibrate_vol() fits variance parameters (c, beta, alpha) by minimizing
+    calibrate_vol() fits variance parameters (c, alpha, k0, k1) by minimizing
     the QLIKE scoring rule on realized variance. Uses the Gaussian model.
 
 Stage 2 — Tails (Fixed-nu Student-t LL):
@@ -90,12 +90,18 @@ def calibrate_vol(
     if not valid.all() and verbose:
         print(f"  Filtering {(~valid).sum()} zero-return rows for objective")
 
-    names = model.param_names()
-    x0 = [model.initial_params()[n] for n in names]
-    bounds = [model.param_bounds()[n] for n in names]
+    all_names = model.param_names()
+    free_names = all_names
+
+    init = model.initial_params()
+    x0 = [init[n] for n in free_names]
+    bounds = [model.param_bounds()[n] for n in free_names]
+
+    def _full_params(x):
+        return dict(zip(free_names, x))
 
     def obj_fn(x):
-        params = dict(zip(names, x))
+        params = _full_params(x)
         var_pred = model.predict_variance(params, S, K, tau, features)
         var_pred = np.maximum(var_pred, 1e-20)
 
@@ -117,14 +123,14 @@ def calibrate_vol(
     jac = None
     if objective == "qlike":
         test_grad = model.qlike_gradient(
-            dict(zip(names, x0)), S, K, tau, features, log_return_sq
+            _full_params(x0), S, K, tau, features, log_return_sq
         )
         if test_grad is not None:
             def jac_fn(x):
-                params = dict(zip(names, x))
+                params = _full_params(x)
                 grad_dict = model.qlike_gradient(params, S, K, tau, features, log_return_sq)
                 grad_vec = []
-                for n in names:
+                for n in free_names:
                     g = grad_dict[n]
                     if market_weighted and market_ids is not None:
                         grad_vec.append(_market_weighted_mean(g, market_ids))
@@ -136,10 +142,10 @@ def calibrate_vol(
     if verbose:
         grad_str = "analytic" if jac is not None else "numeric"
         print(f"\n[Stage 1] Calibrating {model.name} [vol/{objective}, {grad_str} grad] "
-              f"({len(names)} params, {len(S):,} samples) ...")
+              f"({len(free_names)} params, {len(S):,} samples) ...")
 
     res = minimize(obj_fn, x0, method=method, bounds=bounds, jac=jac)
-    fitted = dict(zip(names, [float(v) for v in res.x]))
+    fitted = dict(zip(free_names, [float(v) for v in res.x]))
     model.set_params(fitted)
 
     obj_final = res.fun
@@ -156,7 +162,7 @@ def calibrate_vol(
         print(f"STAGE 1 — VOL CALIBRATION: {model.name} [{objective}]")
         print(f"{'='*60}")
         print(f"\n  Parameters:")
-        for n in names:
+        for n in all_names:
             print(f"    {n:10s} = {fitted[n]:+.6f}")
         print(f"\n  {objective}: {obj_final:.6f}  (baseline: {obj_baseline:.6f})")
         print(f"  Samples: {len(S):,}  Markets: {n_markets}")
@@ -324,3 +330,121 @@ def calibrate_tail_fixed(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 variants: tail-targeted nu estimation
+# ---------------------------------------------------------------------------
+
+def calibrate_tail_truncated(
+    model,
+    dataset: pd.DataFrame,
+    z_cutoff: float = 1.5,
+    verbose: bool = True,
+) -> dict:
+    """Fit nu by MLE on truncated residuals |z| > z_cutoff.
+
+    The truncated log-likelihood conditions on |z| > z_cutoff:
+        l_trunc(nu) = sum_{|z_i|>z0} [log f_nu(z_i/s) - log s - log P(|Z|>z0; nu)]
+
+    Returns dict with 'nu', 'n_tail', 'neg_t_ll_truncated'.
+    """
+    from scipy.optimize import minimize_scalar
+    from scipy.special import gammaln
+    from scipy.stats import t as student_t
+
+    S = dataset["S"].values.astype(np.float64)
+    S_T = dataset["S_T"].values.astype(np.float64)
+    tau = dataset["tau"].values.astype(np.float64)
+    features = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
+
+    v = model._variance(tau, features)
+    z = np.log(S_T / S) / np.sqrt(np.maximum(v, 1e-20))
+
+    tail_mask = np.abs(z) > z_cutoff
+    z_tail = z[tail_mask]
+    n_tail = len(z_tail)
+
+    if n_tail < 10:
+        if verbose:
+            print(f"  [truncated MLE] Only {n_tail} residuals with |z|>{z_cutoff}, skipping.")
+        return {"nu": np.nan, "n_tail": n_tail, "neg_t_ll_truncated": np.nan}
+
+    def neg_trunc_ll(nu):
+        scale = np.sqrt((nu - 2.0) / nu)
+        w = z_tail / scale
+        # Log-density at each tail observation
+        ll_obs = (gammaln(0.5 * (nu + 1)) - gammaln(0.5 * nu)
+                  - 0.5 * np.log(nu * np.pi)
+                  - 0.5 * (nu + 1) * np.log(1.0 + w ** 2 / nu)
+                  - np.log(scale))
+        # Subtract log of tail probability (truncation normalization)
+        tail_prob = 2.0 * student_t.sf(z_cutoff / scale, df=nu)
+        tail_prob = max(tail_prob, 1e-20)
+        ll_obs = ll_obs - np.log(tail_prob)
+        return -float(np.mean(ll_obs))
+
+    bounds = model.param_bounds()["nu"]
+
+    if verbose:
+        print(f"\n[Stage 2 — truncated MLE] z_cutoff={z_cutoff:.1f}, "
+              f"{n_tail:,} tail obs ({n_tail/len(z)*100:.1f}%) ...")
+
+    res = minimize_scalar(neg_trunc_ll, bounds=bounds, method="bounded")
+    nu_hat = float(res.x)
+
+    if verbose:
+        print(f"  nu = {nu_hat:.4f}  (neg trunc LL = {res.fun:.6f})")
+
+    return {"nu": nu_hat, "n_tail": n_tail, "neg_t_ll_truncated": float(res.fun)}
+
+
+def calibrate_tail_exceedance(
+    model,
+    dataset: pd.DataFrame,
+    threshold: float = 2.0,
+    verbose: bool = True,
+) -> dict:
+    """Fit nu by minimizing binary log-loss on the exceedance indicator 1{|z|>q}.
+
+    For each observation, the model predicts P(|z|>q) = 2*(1 - T_nu(q/s(nu))).
+    nu is chosen to minimize log-loss on Y_i = 1{|z_i| > q}.
+
+    Returns dict with 'nu', 'exceedance_rate', 'exceedance_ll'.
+    """
+    from scipy.optimize import minimize_scalar
+    from scipy.stats import t as student_t
+
+    S = dataset["S"].values.astype(np.float64)
+    S_T = dataset["S_T"].values.astype(np.float64)
+    tau = dataset["tau"].values.astype(np.float64)
+    features = {f: dataset[f].values.astype(np.float64) for f in model.required_features()}
+
+    v = model._variance(tau, features)
+    z = np.log(S_T / S) / np.sqrt(np.maximum(v, 1e-20))
+
+    Y = (np.abs(z) > threshold).astype(np.float64)
+    exc_rate = float(Y.mean())
+
+    def neg_exc_ll(nu):
+        scale = np.sqrt((nu - 2.0) / nu)
+        p_exc = 2.0 * student_t.sf(threshold / scale, df=nu)
+        p_exc = np.clip(p_exc, 1e-9, 1.0 - 1e-9)
+        # Binary log-loss on exceedance indicator
+        ll = -(Y * np.log(p_exc) + (1.0 - Y) * np.log(1.0 - p_exc))
+        return float(np.mean(ll))
+
+    bounds = model.param_bounds()["nu"]
+
+    if verbose:
+        print(f"\n[Stage 2 — exceedance matching] threshold={threshold:.1f}, "
+              f"exceedance rate={exc_rate:.4f} ({exc_rate*100:.2f}%) ...")
+
+    res = minimize_scalar(neg_exc_ll, bounds=bounds, method="bounded")
+    nu_hat = float(res.x)
+
+    if verbose:
+        scale = np.sqrt((nu_hat - 2.0) / nu_hat)
+        model_rate = 2.0 * student_t.sf(threshold / scale, df=nu_hat)
+        print(f"  nu = {nu_hat:.4f}  (exc LL = {res.fun:.6f})")
+        print(f"  Empirical rate: {exc_rate:.4f}  Model rate: {model_rate:.4f}")
+
+    return {"nu": nu_hat, "exceedance_rate": exc_rate, "exceedance_ll": float(res.fun)}

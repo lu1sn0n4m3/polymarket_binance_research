@@ -1,8 +1,9 @@
 """Fixed-nu Student-t model.
 
 Two-stage model:
-  Stage 1 (frozen): variance from QLIKE calibration
-    v = c^2 * sigma_tod^2 * sigma_rel^{2*beta} * tau^alpha
+  Stage 1 (frozen): variance from QLIKE calibration (horizon-dependent shrinkage)
+    v = c^2 * sigma_tod^2 * tau^alpha * [m + (1-m) * sigma_rel^2]
+    m = sigmoid(k0 + k1*log(tau))
 
   Stage 2 (fitted): single scalar nu, calibrated via MLE on z-residuals
     p = T_nu(-k / (s(nu) * sqrt(v)))
@@ -17,8 +18,7 @@ import numpy as np
 from scipy.stats import t as student_t
 
 from pricing.models.base import Model
-
-NU_MIN = 3.0
+from pricing.models.gaussian import _expit
 
 
 class FixedTModel(Model):
@@ -36,17 +36,25 @@ class FixedTModel(Model):
         with open(path) as f:
             vp = json.load(f)
         self.c = vp["c"]
-        self.beta = vp["beta"]
         self.alpha = vp["alpha"]
+        self.k0 = vp.get("k0", -100.0)
+        self.k1 = vp.get("k1", 0.0)
 
     def _variance(self, tau, features):
         """Compute frozen variance v_t(tau) from Stage 1 params."""
         sigma_tod = features["sigma_tod"]
-        sigma_rel = features["sigma_rel"]
-        return (self.c ** 2
-                * sigma_tod ** 2
-                * np.power(np.maximum(sigma_rel, 1e-12), 2 * self.beta)
-                * np.power(np.maximum(tau, 1e-6), self.alpha))
+        sigma_rel = np.maximum(features["sigma_rel"], 1e-12)
+
+        log_tau = np.log(np.maximum(tau, 1e-6))
+
+        # Shrinkage
+        z = self.k0 + self.k1 * log_tau
+        m = _expit(z)
+        sr_sq = sigma_rel ** 2
+        f = m + (1.0 - m) * sr_sq
+
+        base = sigma_tod ** 2 * np.power(np.maximum(tau, 1e-6), self.alpha)
+        return self.c ** 2 * base * f
 
     def predict(self, params, S, K, tau, features):
         v = self._variance(tau, features)
