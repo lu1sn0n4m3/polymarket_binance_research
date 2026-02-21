@@ -894,10 +894,15 @@ def render_single_market_view(model: Model, param_sets: dict[str, dict], data: d
 
     if show_ci and pricer is not None and "QLIKE" in param_sets:
         try:
-            _, p_lo, p_hi = pricer.price_with_ci(
+            p_mid_pricer, p_lo, p_hi = pricer.price_with_ci(
                 S=data["S_arr"], K=data["K_arr"], tau=data["tau_arr"],
                 sigma_rv=data["features"]["sigma_rv"], t_ms=data["ts_market"],
+                ewma_half_life=data.get("ewma_half_life", 600.0),
             )
+            # Recenter CI on dashboard prediction (uses locally computed sigma_tod)
+            offset = predictions["QLIKE"] - p_mid_pricer
+            p_lo = p_lo + offset
+            p_hi = p_hi + offset
             fig.add_trace(go.Scatter(
                 x=times, y=p_lo, mode="lines", line=dict(width=0),
                 showlegend=False, hoverinfo="skip",
@@ -1209,6 +1214,7 @@ elif view_mode == "Single Market":
         elif data is None:
             st.error(f"No data for {asset} {selected_date} hour={hour_et} ET")
         else:
+            data["ewma_half_life"] = ewma_half_life
             # Build param_sets dict from selected options
             param_sets = {}
             if "QLIKE" in selected_param_sets:

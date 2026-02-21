@@ -44,9 +44,6 @@ class Pricer:
         sigma_tod_weekday: np.ndarray,
         sigma_tod_weekend: np.ndarray,
         bucket_minutes: int = 5,
-        param_cov: np.ndarray | None = None,
-        n_draws: int = 200,
-        seed: int = 42,
     ):
         self.c = vol_params["c"]
         self.alpha = vol_params["alpha"]
@@ -55,15 +52,6 @@ class Pricer:
         self.sigma_tod_weekday = sigma_tod_weekday
         self.sigma_tod_weekend = sigma_tod_weekend
         self.bucket_minutes = bucket_minutes
-
-        self._theta_hat = np.array([self.c, self.alpha, self.k0, self.k1])
-        self._param_cov = param_cov
-        self._param_draws = None
-        if param_cov is not None:
-            rng = np.random.default_rng(seed)
-            self._param_draws = rng.multivariate_normal(
-                self._theta_hat, param_cov, size=n_draws
-            )
 
     @classmethod
     def from_calibration(cls, output_dir: str | Path = "pricing/output") -> "Pricer":
@@ -82,14 +70,7 @@ class Pricer:
         sv_we = pd.read_parquet(output_dir / "seasonal_vol_weekend.parquet")
         bucket_minutes = 5
 
-        param_cov = None
-        if "param_cov" in vp:
-            param_cov = np.array(vp["param_cov"])
-
-        return cls(
-            vol_params, sv_wd["sigma_tod"].values, sv_we["sigma_tod"].values,
-            bucket_minutes, param_cov=param_cov,
-        )
+        return cls(vol_params, sv_wd["sigma_tod"].values, sv_we["sigma_tod"].values, bucket_minutes)
 
     def _sigma_tod_integrated(self, t_ms, tau):
         """Integrated remaining seasonal vol: RMS average of sigma_tod over [t, t+tau]."""
@@ -172,51 +153,56 @@ class Pricer:
 
         return np.clip(p, 1e-9, 1.0 - 1e-9)
 
-    def price_with_ci(self, S, K, tau, sigma_rv, t_ms, ci=0.95):
-        """Compute price with parameter-uncertainty confidence interval.
+    def price_with_ci(self, S, K, tau, sigma_rv, t_ms, ci=0.95,
+                      ewma_half_life=600.0, tick_dt=1.0, n_draws=200):
+        """Compute price with EWMA variance-uncertainty confidence interval.
 
-        Returns (p_mid, p_lo, p_hi) where p_mid is the point estimate
-        and (p_lo, p_hi) bracket the CI from Monte Carlo param draws.
+        Samples sigma_rv from its chi-squared sampling distribution
+        (n_eff = ewma_half_life / (2 * tick_dt) effective observations)
+        and propagates through the pricing formula.
+
+        Returns (p_mid, p_lo, p_hi).
         """
-        if self._param_draws is None:
-            raise RuntimeError(
-                "No parameter covariance available. Re-run calibration to generate it."
-            )
+        S = np.atleast_1d(np.asarray(S, dtype=np.float64))
+        K = np.atleast_1d(np.asarray(K, dtype=np.float64))
+        tau = np.atleast_1d(np.asarray(tau, dtype=np.float64))
+        sigma_rv = np.atleast_1d(np.asarray(sigma_rv, dtype=np.float64))
 
-        S = np.asarray(S, dtype=np.float64)
-        K = np.asarray(K, dtype=np.float64)
-        tau = np.asarray(tau, dtype=np.float64)
-        sigma_rv = np.asarray(sigma_rv, dtype=np.float64)
-
-        # Shared features computed once
         sigma_tod = self._sigma_tod_integrated(t_ms, tau)
-        sigma_rel = sigma_rv / np.maximum(sigma_tod, 1e-12)
-        sigma_rel = np.maximum(sigma_rel, 1e-12)
         log_tau = np.log(np.maximum(tau, 1e-6))
         k = np.log(K / S)
 
-        # Broadcast: (D, 1) params against (1, N) observations
-        c_d = self._param_draws[:, 0][:, None]
-        alpha_d = self._param_draws[:, 1][:, None]
-        k0_d = self._param_draws[:, 2][:, None]
-        k1_d = self._param_draws[:, 3][:, None]
+        # Shrinkage (fixed params, shared across draws)
+        z = self.k0 + self.k1 * log_tau
+        m = _expit(z)  # (N,)
 
-        lt = log_tau[None, :]
-        z = k0_d + k1_d * lt
-        m = _expit(z)
-        sr_sq = sigma_rel[None, :] ** 2
-        f = m + (1.0 - m) * sr_sq
+        # Chi-squared draws for EWMA variance uncertainty
+        n_eff = ewma_half_life / (2.0 * tick_dt)
+        rng = np.random.default_rng(42)
+        chi2_scale = rng.chisquare(n_eff, size=n_draws) / n_eff  # (D,)
 
-        base = sigma_tod[None, :] ** 2 * np.power(np.maximum(tau[None, :], 1e-6), alpha_d)
-        v = c_d ** 2 * base * f
+        # sigma_rv_d: (D, N) — perturbed realized vol for each draw
+        sigma_rv_d = sigma_rv[None, :] * np.sqrt(chi2_scale[:, None])
+        sigma_rel_d = sigma_rv_d / np.maximum(sigma_tod[None, :], 1e-12)
+        sigma_rel_d = np.maximum(sigma_rel_d, 1e-12)
+
+        sr_sq = sigma_rel_d ** 2  # (D, N)
+        f = m[None, :] + (1.0 - m[None, :]) * sr_sq
+
+        base = sigma_tod ** 2 * np.power(np.maximum(tau, 1e-6), self.alpha)  # (N,)
+        v = self.c ** 2 * base[None, :] * f  # (D, N)
 
         sqrt_v = np.sqrt(np.maximum(v, 1e-20))
         p = norm.cdf(-k[None, :] / sqrt_v)
         p = np.clip(p, 1e-9, 1.0 - 1e-9)
 
         alpha_tail = (1.0 - ci) / 2.0
-        p_lo = np.quantile(p, alpha_tail, axis=0)
-        p_hi = np.quantile(p, 1.0 - alpha_tail, axis=0)
         p_mid = self.price(S.ravel(), K.ravel(), tau.ravel(), sigma_rv.ravel(), t_ms)
+
+        # Recenter MC quantiles on point estimate (Jensen's inequality correction)
+        mc_mean = np.mean(p, axis=0)
+        shift = p_mid - mc_mean
+        p_lo = np.quantile(p, alpha_tail, axis=0) + shift
+        p_hi = np.quantile(p, 1.0 - alpha_tail, axis=0) + shift
 
         return p_mid, p_lo, p_hi
