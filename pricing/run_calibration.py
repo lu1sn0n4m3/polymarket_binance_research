@@ -61,6 +61,18 @@ print(f"{'='*60}")
 print(f"  Baseline (constant):  {ll_baseline:.6f}")
 print(f"  Gaussian (QLIKE vol): {ll_gauss:.6f}  ({(ll_baseline - ll_gauss)/ll_baseline*100:+.1f}%)")
 
+if result_vol.metadata.get("param_cov") is not None:
+    cov = np.array(result_vol.metadata["param_cov"])
+    names = result_vol.metadata.get("param_names", list(result_vol.params.keys()))
+    se = np.sqrt(np.maximum(np.diag(cov), 0))
+    print(f"\n{'='*60}")
+    print(f"PARAMETER STANDARD ERRORS (Hessian, N={result_vol.n_samples:,})")
+    print(f"{'='*60}")
+    for n, s in zip(names, se):
+        val = result_vol.params[n]
+        cv = s / abs(val) * 100 if abs(val) > 1e-8 else float("nan")
+        print(f"  {n:10s} = {val:+.6f}  +/-{s:.6f}  (CV = {cv:.1f}%)")
+
 # =====================================================================
 # Diagnostic plot
 # =====================================================================

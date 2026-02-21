@@ -1,7 +1,9 @@
 """EWMA realized volatility using tick-time sum(dx^2)/sum(dt) estimator.
 
 Computes sigma_rv at each price change using exponentially-weighted moving
-average of the realized variance per second.
+average of the realized variance per second.  Returns are winsorized at
+``clip_sigma`` standard deviations before entering the EWMA to prevent
+discrete jumps from nuking the estimate.
 """
 
 from __future__ import annotations
@@ -13,19 +15,27 @@ import pandas as pd
 def compute_rv_ewma(
     bbo: pd.DataFrame,
     half_life_sec: float = 300.0,
+    clip_sigma: float = 5.0,
     ts_col: str = "ts_recv",
     mid_col: str = "mid_px",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute EWMA realized volatility on tick-time data.
 
     Uses "sum(dx^2) / sum(dt)" estimator with EWMA weighting:
-        ewma_sum_sq = decay * ewma_sum_sq_prev + dx^2
+        ewma_sum_sq = decay * ewma_sum_sq_prev + dx_clipped^2
         ewma_sum_dt = decay * ewma_sum_dt_prev + dt
         sigma_rv = sqrt(ewma_sum_sq / ewma_sum_dt)
+
+    Before each return is added to the EWMA, it is winsorized:
+        |dx| is capped at clip_sigma * sigma_rv_prev * sqrt(dt).
+    This prevents a single large price jump from dominating the
+    vol estimate while still tracking genuine regime changes.
 
     Args:
         bbo: DataFrame with timestamp and mid price columns.
         half_life_sec: EWMA half-life in seconds.
+        clip_sigma: Cap individual returns at this many sigmas of
+            the current EWMA estimate.  None to disable.
         ts_col: Name of timestamp column (epoch ms).
         mid_col: Name of mid price column.
 
@@ -69,9 +79,9 @@ def compute_rv_ewma(
         return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
 
     sigma_rv = np.zeros(n)
-    dx_sq = dx ** 2
 
-    # Initialize with first few ticks
+    # Initialize with first few ticks (unclipped — need a stable seed)
+    dx_sq = dx ** 2
     init_window = min(100, n // 10)
     if init_window > 10:
         init_sq = np.sum(dx_sq[:init_window])
@@ -85,8 +95,17 @@ def compute_rv_ewma(
 
     for i in range(n):
         decay = np.exp(-log2 * dt_sec[i] / half_life_sec)
-        ewma_sq = decay * ewma_sq + dx_sq[i]
+        ewma_sq_decayed = decay * ewma_sq
         ewma_dt = decay * ewma_dt + dt_sec[i]
+
+        # Winsorize: cap |dx| at clip_sigma * current_sigma * sqrt(dt)
+        if clip_sigma is not None and i > 0:
+            cap = clip_sigma * sigma_rv[i - 1] * np.sqrt(dt_sec[i])
+            dx_i = min(abs(dx[i]), cap)
+            ewma_sq = ewma_sq_decayed + dx_i ** 2
+        else:
+            ewma_sq = ewma_sq_decayed + dx_sq[i]
+
         sigma_rv[i] = np.sqrt(max(ewma_sq / max(ewma_dt, 1e-6), 1e-12))
 
     return ts_tick, sigma_rv

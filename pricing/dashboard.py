@@ -34,6 +34,7 @@ from pricing.dataset import build_dataset, DatasetConfig
 from pricing.diagnostics import variance_ratio_diagnostics
 from pricing.features.seasonal_vol import compute_seasonal_vol
 from pricing.features.realized_vol import compute_rv_ewma
+from pricing.pricer import Pricer
 from marketdata.data import (
     load_binance, load_binance_labels,
     load_polymarket_market, get_cache_status,
@@ -48,6 +49,7 @@ DATASET_PATH = OUTPUT_DIR / "calibration_dataset.parquet"
 
 COLORS = {
     "model": "#E91E63",
+    "model_pm": "#FF9800",
     "pm_mid": "#3b82f6",
     "pm_bid": "#22c55e",
     "pm_ask": "#ef4444",
@@ -131,6 +133,14 @@ def load_cached_dataset() -> pd.DataFrame:
     return pd.DataFrame()
 
 
+@st.cache_resource
+def _load_pricer():
+    try:
+        return Pricer.from_calibration(str(OUTPUT_DIR))
+    except Exception:
+        return None
+
+
 def load_cached_params(model_name: str) -> dict | None:
     path = OUTPUT_DIR / f"{model_name}_params.json"
     if path.exists():
@@ -142,7 +152,7 @@ def load_cached_params(model_name: str) -> dict | None:
 @st.cache_data(ttl=300)
 def load_single_market_data(
     asset: str, market_date: str, hour_et: int,
-    ewma_half_life_sec: float = 60.0,
+    ewma_half_life_sec: float = 600.0,
 ):
     """Load and prepare all data for a single market view.
 
@@ -177,7 +187,7 @@ def load_single_market_data(
     seasonal = compute_seasonal_vol(bnc)
 
     # EWMA sigma_rv
-    ts_rv, sigma_rv_full = compute_rv_ewma(bnc, seasonal_vol=seasonal, half_life_sec=ewma_half_life_sec)
+    ts_rv, sigma_rv_full = compute_rv_ewma(bnc, half_life_sec=ewma_half_life_sec)
     if len(ts_rv) == 0:
         return None
 
@@ -815,8 +825,16 @@ def _render_conditional_reliability(p_pred, y, tau_min, sigma_rel):
 # Single market view
 # ---------------------------------------------------------------------------
 
-def render_single_market_view(model: Model, params: dict, data: dict):
-    """Render 3-panel single market chart with model vs polymarket."""
+def render_single_market_view(model: Model, param_sets: dict[str, dict], data: dict,
+                              pricer=None, show_ci: bool = False):
+    """Render 3-panel single market chart with model vs polymarket.
+
+    Args:
+        param_sets: dict mapping label -> params dict.
+            e.g. {"QLIKE": {...}, "PM-calibrated": {...}}
+    """
+    PARAM_COLORS = {"QLIKE": COLORS["model"], "PM-calibrated": COLORS["model_pm"]}
+
     K = data["K"]
     S_T = data["S_T"]
     Y = data["Y"]
@@ -831,14 +849,17 @@ def render_single_market_view(model: Model, params: dict, data: dict):
     cols[3].metric("Outcome", outcome)
     cols[4].metric("Data points", f"{len(data['S_arr']):,}")
 
-    # Model predictions with current params
+    # Model predictions for each param set
     model_features = {f: data["features"][f] for f in model.required_features() if f in data["features"]}
-    p_model = model.predict(params, data["S_arr"], data["K_arr"], data["tau_arr"], model_features)
+    predictions = {}
+    for label, params in param_sets.items():
+        predictions[label] = model.predict(params, data["S_arr"], data["K_arr"], data["tau_arr"], model_features)
 
     times = _ts_to_dt(data["ts_market"])
     mid = data["mid_market"]
 
     has_pm = data["pm_ts"] is not None and data["pm_mid"] is not None
+    single_set = len(param_sets) == 1
 
     fig = make_subplots(
         rows=3, cols=1,
@@ -862,12 +883,34 @@ def render_single_market_view(model: Model, params: dict, data: dict):
                   row=1, col=1)
     fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
 
-    # Panel 2: P(Up)
-    fig.add_trace(go.Scatter(
-        x=times, y=p_model, name=f"Model ({model.name})",
-        line=dict(color=COLORS["model"], width=2),
-        hovertemplate="Model: %{y:.3f}<extra></extra>",
-    ), row=2, col=1)
+    # Panel 2: P(Up) — one trace per param set
+    for label, p_model in predictions.items():
+        color = PARAM_COLORS.get(label, COLORS["model"])
+        fig.add_trace(go.Scatter(
+            x=times, y=p_model, name=label,
+            line=dict(color=color, width=2),
+            hovertemplate=f"{label}: %{{y:.3f}}<extra></extra>",
+        ), row=2, col=1)
+
+    if show_ci and pricer is not None and "QLIKE" in param_sets:
+        try:
+            _, p_lo, p_hi = pricer.price_with_ci(
+                S=data["S_arr"], K=data["K_arr"], tau=data["tau_arr"],
+                sigma_rv=data["features"]["sigma_rv"], t_ms=data["ts_market"],
+            )
+            fig.add_trace(go.Scatter(
+                x=times, y=p_lo, mode="lines", line=dict(width=0),
+                showlegend=False, hoverinfo="skip",
+            ), row=2, col=1)
+            fig.add_trace(go.Scatter(
+                x=times, y=p_hi, mode="lines", line=dict(width=0),
+                name="95% CI", fill="tonexty",
+                fillcolor="rgba(233, 30, 99, 0.12)",
+                hovertemplate="CI: [%{customdata[0]:.3f}, %{y:.3f}]<extra></extra>",
+                customdata=np.column_stack([p_lo]),
+            ), row=2, col=1)
+        except RuntimeError:
+            pass
 
     if has_pm:
         pm_times = _ts_to_dt(data["pm_ts"])
@@ -886,30 +929,44 @@ def render_single_market_view(model: Model, params: dict, data: dict):
         pm_ts = data["pm_ts"]
         ts_market = data["ts_market"]
         idx_align = np.searchsorted(ts_market, pm_ts)
-        idx_align = np.clip(idx_align, 0, len(p_model) - 1)
-        edge = p_model[idx_align] - data["pm_mid"]
+        idx_align = np.clip(idx_align, 0, len(ts_market) - 1)
         pm_dt = _ts_to_dt(pm_ts)
 
-        # Positive edge (green fill)
-        edge_pos = np.where(edge > 0, edge, 0)
-        edge_neg = np.where(edge < 0, edge, 0)
+        if single_set:
+            # Single param set: use filled areas
+            label = next(iter(predictions))
+            p_model = predictions[label]
+            edge = p_model[idx_align] - data["pm_mid"]
 
-        fig.add_trace(go.Scatter(
-            x=pm_dt, y=edge_pos, name="Model > PM",
-            fill="tozeroy", fillcolor=COLORS["edge_pos"],
-            line=dict(color="rgba(34,197,94,0.5)", width=0),
-            hovertemplate="Edge: %{y:+.3f}<extra></extra>",
-        ), row=3, col=1)
-        fig.add_trace(go.Scatter(
-            x=pm_dt, y=edge_neg, name="Model < PM",
-            fill="tozeroy", fillcolor=COLORS["edge_neg"],
-            line=dict(color="rgba(239,68,68,0.5)", width=0),
-            hovertemplate="Edge: %{y:+.3f}<extra></extra>",
-        ), row=3, col=1)
-        fig.add_trace(go.Scatter(
-            x=pm_dt, y=edge, showlegend=False,
-            line=dict(color="black", width=0.8),
-        ), row=3, col=1)
+            edge_pos = np.where(edge > 0, edge, 0)
+            edge_neg = np.where(edge < 0, edge, 0)
+
+            fig.add_trace(go.Scatter(
+                x=pm_dt, y=edge_pos, name="Model > PM",
+                fill="tozeroy", fillcolor=COLORS["edge_pos"],
+                line=dict(color="rgba(34,197,94,0.5)", width=0),
+                hovertemplate="Edge: %{y:+.3f}<extra></extra>",
+            ), row=3, col=1)
+            fig.add_trace(go.Scatter(
+                x=pm_dt, y=edge_neg, name="Model < PM",
+                fill="tozeroy", fillcolor=COLORS["edge_neg"],
+                line=dict(color="rgba(239,68,68,0.5)", width=0),
+                hovertemplate="Edge: %{y:+.3f}<extra></extra>",
+            ), row=3, col=1)
+            fig.add_trace(go.Scatter(
+                x=pm_dt, y=edge, showlegend=False,
+                line=dict(color="black", width=0.8),
+            ), row=3, col=1)
+        else:
+            # Multiple param sets: one edge line per set
+            for label, p_model in predictions.items():
+                color = PARAM_COLORS.get(label, COLORS["model"])
+                edge = p_model[idx_align] - data["pm_mid"]
+                fig.add_trace(go.Scatter(
+                    x=pm_dt, y=edge, name=f"Edge ({label})",
+                    line=dict(color=color, width=1.5),
+                    hovertemplate=f"{label}: %{{y:+.3f}}<extra></extra>",
+                ), row=3, col=1)
     else:
         fig.add_annotation(
             text="No Polymarket data", xref="x3 domain", yref="y3 domain",
@@ -959,6 +1016,16 @@ with st.sidebar:
     else:
         st.warning("Not calibrated yet")
 
+    # Load PM-calibrated params (optional)
+    pm_raw = load_cached_params("gaussian_pm")
+    has_pm_params = pm_raw is not None
+    if has_pm_params:
+        pm_calibrated = {
+            "c": pm_raw["c"], "alpha": pm_raw["alpha"],
+            "k0": pm_raw.get("k0", -100.0), "k1": pm_raw.get("k1", 0.0),
+        }
+        st.caption(f"PM-calibrated: c={pm_calibrated['c']:.3f}  alpha={pm_calibrated['alpha']:.3f}")
+
     if st.button("Calibrate" if not has_params else "Recalibrate"):
         dataset = load_cached_dataset()
         if dataset.empty:
@@ -987,6 +1054,8 @@ with st.sidebar:
     asset = "BTC"
     selected_date = None
     hour_et = 10
+    show_ci = False
+    selected_param_sets = ["QLIKE"]
     if view_mode == "Single Market":
         st.divider()
         st.subheader("Market")
@@ -1000,6 +1069,26 @@ with st.sidebar:
             hour_et = st.slider("Hour (ET)", 0, 23, 10)
         else:
             st.warning(f"No Polymarket cache for {asset}")
+
+        # Param set selector
+        param_set_options = ["QLIKE"]
+        if has_pm_params:
+            param_set_options.append("PM-calibrated")
+        selected_param_sets = st.multiselect(
+            "Model params", param_set_options, default=param_set_options,
+        )
+
+        st.divider()
+        st.subheader("Features")
+        ewma_half_life = st.slider(
+            "EWMA half-life (s)", 60, 3600, 600, step=60,
+            help="Calibrated at 600s. Lower = more reactive to recent vol, higher = smoother.",
+        )
+        show_ci = st.checkbox(
+            "Show 95% CI band",
+            value=False,
+            help="Parameter-uncertainty band via Hessian covariance. Requires recalibration if missing.",
+        )
 
     # Parameter sliders
     slider_params = None
@@ -1108,14 +1197,24 @@ elif view_mode == "Single Market":
         st.info("No parameters available. Click **Calibrate** first.")
     elif selected_date is None:
         st.warning("No dates available for the selected asset.")
+    elif not selected_param_sets:
+        st.info("Select at least one param set in the sidebar.")
     else:
         utc_start, utc_end = _et_hour_to_utc(selected_date, hour_et)
         st.caption(f"{hour_et:02d}:00 ET → {utc_start.strftime('%Y-%m-%d %H:%M')}–{utc_end.strftime('%H:%M')} UTC")
         with st.spinner("Loading market data..."):
-            data = load_single_market_data(asset, str(selected_date), hour_et)
+            data = load_single_market_data(asset, str(selected_date), hour_et, ewma_half_life)
         if isinstance(data, str):
             st.error(data)
         elif data is None:
             st.error(f"No data for {asset} {selected_date} hour={hour_et} ET")
         else:
-            render_single_market_view(model, active_params, data)
+            # Build param_sets dict from selected options
+            param_sets = {}
+            if "QLIKE" in selected_param_sets:
+                param_sets["QLIKE"] = active_params
+            if "PM-calibrated" in selected_param_sets and has_pm_params:
+                param_sets["PM-calibrated"] = pm_calibrated
+            pricer_for_ci = _load_pricer() if show_ci else None
+            render_single_market_view(model, param_sets, data,
+                                      pricer=pricer_for_ci, show_ci=show_ci)

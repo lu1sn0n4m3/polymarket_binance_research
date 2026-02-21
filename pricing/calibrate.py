@@ -140,6 +140,24 @@ def calibrate_vol(
     mean_var = float(np.mean(log_return_sq))
     obj_baseline = float(np.log(mean_var) + 1.0)
 
+    # --- Parameter covariance via Hessian of QLIKE ---
+    param_cov = None
+    if jac is not None:
+        from scipy.optimize import approx_fprime
+        n_p = len(free_names)
+        H = np.zeros((n_p, n_p))
+        for i in range(n_p):
+            def _grad_i(x, _i=i):
+                return jac_fn(x)[_i]
+            H[i] = approx_fprime(res.x, _grad_i, 1e-5)
+        H = 0.5 * (H + H.T)
+        eigs = np.linalg.eigvalsh(H)
+        if np.all(eigs > 1e-12):
+            param_cov = np.linalg.inv(H) / len(S)
+        else:
+            ridge = 1e-6 * np.abs(np.diag(H)).max()
+            param_cov = np.linalg.inv(H + ridge * np.eye(n_p)) / len(S)
+
     if verbose:
         print(f"\n{'='*60}")
         print(f"STAGE 1 — VOL CALIBRATION: {model.name} [{objective}]")
@@ -147,6 +165,12 @@ def calibrate_vol(
         print(f"\n  Parameters:")
         for n in all_names:
             print(f"    {n:10s} = {fitted[n]:+.6f}")
+        if param_cov is not None:
+            se = np.sqrt(np.maximum(np.diag(param_cov), 0))
+            print(f"\n  Standard errors (Hessian, N={len(S):,}):")
+            for n, s in zip(free_names, se):
+                cv = s / abs(fitted[n]) * 100 if abs(fitted[n]) > 1e-8 else float("nan")
+                print(f"    {n:10s}  SE = {s:.6f}  (CV = {cv:.1f}%)")
         print(f"\n  {objective}: {obj_final:.6f}  (baseline: {obj_baseline:.6f})")
         print(f"  Samples: {len(S):,}  Markets: {n_markets}")
 
@@ -176,7 +200,13 @@ def calibrate_vol(
         improvement_pct=0.0,
         n_samples=len(S),
         n_markets=n_markets,
-        metadata={"objective": objective, "obj_value": obj_final, "obj_baseline": obj_baseline},
+        metadata={
+            "objective": objective,
+            "obj_value": obj_final,
+            "obj_baseline": obj_baseline,
+            "param_cov": param_cov.tolist() if param_cov is not None else None,
+            "param_names": list(free_names),
+        },
     )
 
     if output_dir is not None:
@@ -194,6 +224,9 @@ def calibrate_vol(
         }
         if ll_final is not None:
             params_out["binary_log_loss"] = ll_final
+        if param_cov is not None:
+            params_out["param_cov"] = param_cov.tolist()
+            params_out["param_names_ordered"] = list(free_names)
         with open(params_path, "w") as f:
             json.dump(params_out, f, indent=2)
         if verbose:
