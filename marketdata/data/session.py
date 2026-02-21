@@ -732,7 +732,7 @@ class HourlyMarketSession:
 
     def binance_resampled(
         self,
-        interval: Literal["500ms", "1s", "5s"] = "1s",
+        interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
         columns: list[str] | None = None,
         include_lookback: bool = False,
     ) -> pd.DataFrame:
@@ -769,7 +769,7 @@ class HourlyMarketSession:
 
     def polymarket_resampled(
         self,
-        interval: Literal["500ms", "1s", "5s"] = "1s",
+        interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
     ) -> pd.DataFrame:
         """Load resampled Polymarket data for this specific market.
 
@@ -805,7 +805,7 @@ class HourlyMarketSession:
 
     def aligned_resampled(
         self,
-        interval: Literal["500ms", "1s", "5s"] = "1s",
+        interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
         method: str = "asof_backward",
         left_suffix: str = "_pm",
         right_suffix: str = "_bnc",

@@ -21,14 +21,20 @@ class Trade:
 
     # Context fields (populated by simulator)
     sigma_rv: float = 0.0  # realized vol at entry
+    sigma_rel: float = 0.0  # sigma_rv / sigma_tod at entry
+    pm_spread: float = 0.0  # pm_ask - pm_bid at entry
     hour_et: int = -1  # hour in ET at entry
     bankroll_at_entry: float = 0.0  # bankroll before this trade
     kelly_fraction: float = 0.0  # raw Kelly fraction used
     mfe: float = 0.0  # max favorable excursion (best unrealized PnL)
     mae: float = 0.0  # max adverse excursion (worst unrealized PnL, negative)
+    exit_pnl: float | None = None  # if set (TP/SL hit), overrides binary settlement
+    exit_reason: str = ""  # "tp", "sl", or "" (held to expiry)
 
     def settle(self, outcome: int) -> float:
-        """Compute PnL given binary outcome Y in {0, 1}."""
+        """Compute PnL. Uses exit_pnl if trade was closed early (TP/SL)."""
+        if self.exit_pnl is not None:
+            return self.exit_pnl
         if self.side == "BUY":
             return self.size * (outcome - self.price)
         else:

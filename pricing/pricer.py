@@ -113,6 +113,10 @@ class Pricer:
         avg_var = integrated / np.maximum(tau, 1e-6)
         return np.sqrt(avg_var)
 
+    def sigma_tod(self, t_ms, tau):
+        """Expose integrated sigma_tod for external use."""
+        return self._sigma_tod_integrated(t_ms, tau)
+
     def price(self, S, K, tau, sigma_rv, t_ms):
         """Compute Gaussian binary option price P(S_T > K).
 

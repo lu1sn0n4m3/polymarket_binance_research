@@ -8,6 +8,19 @@ from typing import Literal
 import pandas as pd
 
 
+def _interval_dir_name(interval_ms: int) -> str:
+    """Convert interval_ms to a directory name that is unique per interval.
+
+    100  -> '100ms'
+    500  -> '500ms'
+    1000 -> '1s'
+    5000 -> '5s'
+    """
+    if interval_ms >= 1000 and interval_ms % 1000 == 0:
+        return f"{interval_ms // 1000}s"
+    return f"{interval_ms}ms"
+
+
 def save_resampled_day(
     df: pd.DataFrame,
     date: datetime,
@@ -27,7 +40,7 @@ def save_resampled_day(
         venue: Data venue ("binance" or "polymarket")
     """
     # Create directory structure: venue/asset={asset}/interval={interval}s/
-    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}"
     interval_dir.mkdir(parents=True, exist_ok=True)
 
     # Save as date=YYYY-MM-DD.parquet
@@ -80,7 +93,7 @@ def load_resampled_day(
         DataFrame if file exists, None otherwise
     """
     date_str = date.strftime("%Y-%m-%d")
-    file_path = cache_dir / venue / f"asset={asset}" / f"interval={interval_ms // 1000}s" / f"date={date_str}.parquet"
+    file_path = cache_dir / venue / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}" / f"date={date_str}.parquet"
 
     if not file_path.exists():
         return None
@@ -112,7 +125,7 @@ def update_metadata(
         venue: Data venue ("binance" or "polymarket")
         stats: Statistics dictionary
     """
-    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}"
     metadata_path = interval_dir / ".metadata.json"
 
     # Load existing metadata or create new
@@ -179,7 +192,7 @@ def get_cache_info(
         - date_range: (min_date, max_date)
         - total_size_mb: Total cache size
     """
-    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / venue / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}"
     metadata_path = interval_dir / ".metadata.json"
 
     if not metadata_path.exists():
@@ -252,7 +265,7 @@ def clear_cache(
                 continue
 
             if interval_ms is not None:
-                interval_dirs = [asset_dir / f"interval={interval_ms // 1000}s"]
+                interval_dirs = [asset_dir / f"interval={_interval_dir_name(interval_ms)}"]
             else:
                 interval_dirs = list(asset_dir.glob("interval=*"))
 

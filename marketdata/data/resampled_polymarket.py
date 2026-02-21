@@ -10,7 +10,7 @@ from typing import Literal
 import pandas as pd
 
 from marketdata.data.alignment import resample_to_grid
-from marketdata.data.cache_manager import load_resampled_day, save_resampled_day, update_metadata
+from marketdata.data.cache_manager import load_resampled_day, save_resampled_day, update_metadata, _interval_dir_name
 from marketdata.data.loaders import load_polymarket_bbo, get_unique_token_ids
 
 
@@ -243,7 +243,7 @@ def get_missing_dates(
     expected_dates = _generate_date_list(start_dt, end_dt)
 
     # Check which files exist
-    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}"
     if not interval_dir.exists():
         return expected_dates
 
@@ -383,7 +383,7 @@ def _process_and_cache_day(
     print(f"    Combining {len(temp_files)} hourly files using DuckDB... [{_log_memory()}]", flush=True)
 
     # Prepare output path
-    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={interval_ms // 1000}s"
+    interval_dir = cache_dir / "polymarket" / f"asset={asset}" / f"interval={_interval_dir_name(interval_ms)}"
     interval_dir.mkdir(parents=True, exist_ok=True)
     date_str = date.strftime("%Y-%m-%d")
     final_path = interval_dir / f"date={date_str}.parquet"

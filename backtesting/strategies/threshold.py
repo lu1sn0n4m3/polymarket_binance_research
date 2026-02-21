@@ -32,6 +32,9 @@ class EdgeThresholdStrategy(Strategy):
     fixed_size: float = 1.0
     max_kelly_fraction: float = 0.25  # cap raw Kelly at 25% of bankroll
     kelly_fraction: float = 0.5  # half-Kelly by default
+    tp_frac: float = 0.0  # take profit at X fraction of size (0 = disabled)
+    sl_frac: float = 0.0  # stop loss at X fraction of size (0 = disabled)
+    latency_ms: int = 0  # execution latency in ms (0 = instant)
 
     # Bankroll is injected by the simulator for Kelly sizing
     _bankroll: float = 100.0
@@ -48,12 +51,15 @@ class EdgeThresholdStrategy(Strategy):
         pm_bid = df["pm_bid"].values
         pm_ask = df["pm_ask"].values
         sigma_rv = df["sigma_rv"].values if "sigma_rv" in df.columns else np.zeros(len(df))
+        sigma_rel = df["sigma_rel"].values if "sigma_rel" in df.columns else np.zeros(len(df))
+        pm_spread = df["pm_spread"].values if "pm_spread" in df.columns else np.zeros(len(df))
 
         buy_edge = model_p - pm_ask
         sell_edge = pm_bid - model_p
 
         trades: list[Trade] = []
-        for i in range(len(df)):
+        n = len(df)
+        for i in range(n):
             if len(trades) >= self.max_entries:
                 break
 
@@ -66,33 +72,65 @@ class EdgeThresholdStrategy(Strategy):
             if spread <= 0:
                 continue
 
+            # With latency, fill at t+latency price. Find fill index.
+            if self.latency_ms > 0:
+                fill_ts = int(ts[i]) + self.latency_ms
+                # Find the first row at or after fill_ts
+                fill_idx = i + 1
+                while fill_idx < n and ts[fill_idx] < fill_ts:
+                    fill_idx += 1
+                if fill_idx >= n:
+                    continue  # no fill possible (too close to expiry)
+                if np.isnan(pm_bid[fill_idx]) or np.isnan(pm_ask[fill_idx]):
+                    continue
+                fill_ask = float(pm_ask[fill_idx])
+                fill_bid = float(pm_bid[fill_idx])
+                fill_tau = float(tau[fill_idx])
+                fill_ts_int = int(ts[fill_idx])
+            else:
+                fill_ask = float(pm_ask[i])
+                fill_bid = float(pm_bid[i])
+                fill_tau = float(tau[i])
+                fill_ts_int = int(ts[i])
+
             if buy_edge[i] > self.min_edge:
+                # Size based on signal-time model_p vs fill price
                 size = self._compute_size(
-                    "BUY", float(model_p[i]), float(pm_ask[i]),
+                    "BUY", float(model_p[i]), fill_ask,
                 )
                 if size <= 0:
                     continue
-                kelly_f = self._raw_kelly("BUY", float(model_p[i]), float(pm_ask[i]))
+                actual_edge = float(model_p[i]) - fill_ask
+                if actual_edge <= 0:
+                    continue  # edge disappeared during latency
+                kelly_f = self._raw_kelly("BUY", float(model_p[i]), fill_ask)
                 trades.append(Trade(
-                    ts=int(ts[i]), side="BUY", size=size,
-                    price=float(pm_ask[i]), model_price=float(model_p[i]),
-                    edge=float(buy_edge[i]), tau=float(tau[i]),
+                    ts=fill_ts_int, side="BUY", size=size,
+                    price=fill_ask, model_price=float(model_p[i]),
+                    edge=actual_edge, tau=fill_tau,
                     sigma_rv=float(sigma_rv[i]),
+                    sigma_rel=float(sigma_rel[i]),
+                    pm_spread=float(pm_spread[i]),
                     bankroll_at_entry=self._bankroll,
                     kelly_fraction=kelly_f,
                 ))
             elif sell_edge[i] > self.min_edge:
                 size = self._compute_size(
-                    "SELL", float(model_p[i]), float(pm_bid[i]),
+                    "SELL", float(model_p[i]), fill_bid,
                 )
                 if size <= 0:
                     continue
-                kelly_f = self._raw_kelly("SELL", float(model_p[i]), float(pm_bid[i]))
+                actual_edge = fill_bid - float(model_p[i])
+                if actual_edge <= 0:
+                    continue  # edge disappeared during latency
+                kelly_f = self._raw_kelly("SELL", float(model_p[i]), fill_bid)
                 trades.append(Trade(
-                    ts=int(ts[i]), side="SELL", size=size,
-                    price=float(pm_bid[i]), model_price=float(model_p[i]),
-                    edge=float(sell_edge[i]), tau=float(tau[i]),
+                    ts=fill_ts_int, side="SELL", size=size,
+                    price=fill_bid, model_price=float(model_p[i]),
+                    edge=actual_edge, tau=fill_tau,
                     sigma_rv=float(sigma_rv[i]),
+                    sigma_rel=float(sigma_rel[i]),
+                    pm_spread=float(pm_spread[i]),
                     bankroll_at_entry=self._bankroll,
                     kelly_fraction=kelly_f,
                 ))
@@ -120,7 +158,14 @@ class EdgeThresholdStrategy(Strategy):
 
     @property
     def name(self) -> str:
+        parts = [f"edge={self.min_edge}"]
         if self.sizing == "kelly":
-            return (f"EdgeThreshold(edge={self.min_edge}, tau>{self.min_tau}s, "
-                    f"kelly={self.kelly_fraction:.0%})")
-        return f"EdgeThreshold(edge={self.min_edge}, tau>{self.min_tau}s, {self.sizing})"
+            parts.append(f"kelly={self.kelly_fraction:.0%}")
+            parts.append(f"max={self.max_kelly_fraction:.0%}")
+        if self.tp_frac > 0:
+            parts.append(f"tp={self.tp_frac:.0%}")
+        if self.sl_frac > 0:
+            parts.append(f"sl={self.sl_frac:.0%}")
+        if self.latency_ms > 0:
+            parts.append(f"lat={self.latency_ms}ms")
+        return f"EdgeThreshold({', '.join(parts)})"

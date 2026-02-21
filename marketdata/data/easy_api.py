@@ -66,7 +66,7 @@ def load_binance(
     start: str | datetime,
     end: str | datetime,
     asset: Literal["BTC", "ETH"] = "BTC",
-    interval: Literal["500ms", "1s", "5s"] = "1s",
+    interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
     columns: list[str] | None = None,
     cache_dir: Path | str | None = None,
     force_reload: bool = False,
@@ -216,7 +216,7 @@ def load_polymarket_market(
     asset: Literal["BTC", "ETH"],
     date: str | date | datetime,
     hour_et: int,
-    interval: Literal["500ms", "1s", "5s"] = "1s",
+    interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
     cache_dir: Path | str | None = None,
     force_reload: bool = False,
 ) -> pd.DataFrame:
@@ -455,7 +455,7 @@ def align_timestamps(
 def get_cache_status(
     venue: Literal["binance", "polymarket"],
     asset: Literal["BTC", "ETH"] = "BTC",
-    interval: Literal["500ms", "1s", "5s"] = "1s",
+    interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
 ) -> dict:
     """Check what data is cached locally for a venue.
 
@@ -491,7 +491,7 @@ def get_cache_status(
 def clear_cache(
     venue: Literal["binance", "polymarket"],
     asset: Literal["BTC", "ETH"] = "BTC",
-    interval: Literal["500ms", "1s", "5s"] = "1s",
+    interval: Literal["100ms", "500ms", "1s", "5s"] = "1s",
     before_date: str | date | None = None,
 ) -> int:
     """Clear cached data for a venue.
@@ -565,6 +565,7 @@ def _parse_datetime(dt: str | datetime) -> datetime:
 def _parse_interval(interval: str) -> int:
     """Parse interval string to milliseconds."""
     mapping = {
+        "100ms": 100,
         "500ms": 500,
         "1s": 1000,
         "5s": 5000,

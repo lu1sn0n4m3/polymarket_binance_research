@@ -23,6 +23,7 @@ def run_backtest(
     ewma_half_life: float = 600.0,
     initial_bankroll: float = 100.0,
     verbose: bool = True,
+    grid_ms: int = 1000,
 ) -> BacktestResult:
     """Run a backtest over a date range with bankroll tracking.
 
@@ -46,9 +47,11 @@ def run_backtest(
     start_dt = datetime.combine(start_date, dt_time(0), tzinfo=timezone.utc)
     end_dt = datetime.combine(end_date + timedelta(days=1), dt_time(0), tzinfo=timezone.utc)
 
+    # Map grid_ms to interval string for data loading
+    _interval_str = {100: "100ms", 500: "500ms", 1000: "1s", 5000: "5s"}.get(grid_ms, "1s")
     if verbose:
-        print(f"Loading Binance BBO {start_date} to {end_date} ({asset}, 1s) ...")
-    bbo = load_binance(start=start_dt, end=end_dt, asset=asset, interval="1s")
+        print(f"Loading Binance BBO {start_date} to {end_date} ({asset}, {_interval_str}) ...")
+    bbo = load_binance(start=start_dt, end=end_dt, asset=asset, interval=_interval_str)
     if verbose:
         print(f"  {len(bbo):,} BBO rows")
 
@@ -85,13 +88,14 @@ def run_backtest(
 
     if verbose:
         print("Loading Polymarket data ...")
-    pm_lookup = _build_pm_lookup(start_dt, end_dt, asset, labels)
+    pm_lookup = _build_pm_lookup(start_dt, end_dt, asset, labels, interval_ms=grid_ms)
     if verbose:
         print(f"  {len(pm_lookup)} markets with PM data")
 
     results, bankroll_curve = _run_on_labels_with_bankroll(
         asset, labels, strategy, pricer, bbo_ts, bbo_mid,
         ts_rv, sigma_rv_full, pm_lookup, initial_bankroll,
+        grid_ms=grid_ms,
     )
 
     traded = sum(1 for r in results if r.trades)
@@ -112,7 +116,7 @@ def run_backtest(
 
 
 def _build_pm_lookup(
-    start_dt, end_dt, asset, labels,
+    start_dt, end_dt, asset, labels, interval_ms: int = 1000,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Pre-load and normalize Polymarket data for all market hours."""
     from marketdata.data.resampled_polymarket import load_resampled_polymarket
@@ -120,7 +124,7 @@ def _build_pm_lookup(
     pm_lookup: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     try:
         pm_all = load_resampled_polymarket(
-            start_dt=start_dt, end_dt=end_dt, interval_ms=1000, asset=asset,
+            start_dt=start_dt, end_dt=end_dt, interval_ms=interval_ms, asset=asset,
         )
     except Exception:
         return pm_lookup
@@ -162,7 +166,7 @@ def _build_pm_lookup(
     return pm_lookup
 
 
-def _compute_mfe_mae(
+def _compute_mfe_mae_tpsl(
     trade_ts: int,
     trade_side: str,
     trade_price: float,
@@ -170,32 +174,57 @@ def _compute_mfe_mae(
     grid_ts: np.ndarray,
     pm_bid_grid: np.ndarray,
     pm_ask_grid: np.ndarray,
-) -> tuple[float, float]:
-    """Compute MFE/MAE for a trade using post-entry PM bid/ask path.
+    tp_frac: float = 0.0,
+    sl_frac: float = 0.0,
+) -> tuple[float, float, float | None, str]:
+    """Compute MFE/MAE and check TP/SL for a trade.
 
-    MFE = max favorable excursion (best unrealized PnL, positive)
-    MAE = max adverse excursion (worst unrealized PnL, negative)
-
-    For BUY: mark-to-market at pm_bid (liquidation price)
-        unrealized = size * (pm_bid - entry_price)
-    For SELL: mark-to-market at pm_ask (cover price)
-        unrealized = size * (entry_price - pm_ask)
+    Returns (mfe, mae, exit_pnl, exit_reason).
+    exit_pnl is None if held to expiry, otherwise the realized PnL from early exit.
+    exit_reason is "tp", "sl", or "".
     """
-    # Find snapshots after trade entry
     post_mask = grid_ts > trade_ts
     if not post_mask.any():
-        return 0.0, 0.0
+        return 0.0, 0.0, None, ""
 
     if trade_side == "BUY":
-        # To close a BUY, we sell at bid
         unrealized = trade_size * (pm_bid_grid[post_mask] - trade_price)
     else:
-        # To close a SELL, we buy at ask
         unrealized = trade_size * (trade_price - pm_ask_grid[post_mask])
 
-    mfe = float(np.max(unrealized)) if len(unrealized) > 0 else 0.0
-    mae = float(np.min(unrealized)) if len(unrealized) > 0 else 0.0
-    return max(mfe, 0.0), min(mae, 0.0)
+    # Filter NaN
+    valid = ~np.isnan(unrealized)
+    unrealized_clean = unrealized[valid]
+    if len(unrealized_clean) == 0:
+        return 0.0, 0.0, None, ""
+
+    mfe = float(max(np.max(unrealized_clean), 0.0))
+    mae = float(min(np.min(unrealized_clean), 0.0))
+
+    # Check TP/SL (scan chronologically, first trigger wins)
+    # Use ACTUAL unrealized at trigger tick, not the threshold.
+    # This is realistic: you exit at whatever the book shows when
+    # the threshold is crossed. On 1s data this is very close to
+    # the threshold, but for SL it can be worse (gap through stop).
+    exit_pnl = None
+    exit_reason = ""
+    tp_threshold = trade_size * tp_frac if tp_frac > 0 else float("inf")
+    sl_threshold = -trade_size * sl_frac if sl_frac > 0 else float("-inf")
+
+    if tp_frac > 0 or sl_frac > 0:
+        for u in unrealized:
+            if np.isnan(u):
+                continue
+            if u >= tp_threshold:
+                exit_pnl = float(u)  # actual fill, not threshold
+                exit_reason = "tp"
+                break
+            if u <= sl_threshold:
+                exit_pnl = float(u)  # actual fill — may be worse than stop
+                exit_reason = "sl"
+                break
+
+    return mfe, mae, exit_pnl, exit_reason
 
 
 def _run_on_labels(
@@ -208,11 +237,13 @@ def _run_on_labels(
     ts_rv: np.ndarray,
     sigma_rv_full: np.ndarray,
     pm_lookup: dict,
+    grid_ms: int = 1000,
 ) -> list[MarketResult]:
     """Run strategy on a set of market-hour labels. Core inner loop."""
     results, _ = _run_on_labels_with_bankroll(
         asset, labels, strategy, pricer, bbo_ts, bbo_mid,
         ts_rv, sigma_rv_full, pm_lookup, bankroll=None,
+        grid_ms=grid_ms,
     )
     return results
 
@@ -228,6 +259,7 @@ def _run_on_labels_with_bankroll(
     sigma_rv_full: np.ndarray,
     pm_lookup: dict,
     bankroll: float | None = None,
+    grid_ms: int = 1000,
 ) -> tuple[list[MarketResult], np.ndarray]:
     """Run strategy on labels with optional bankroll tracking.
 
@@ -255,7 +287,7 @@ def _run_on_labels_with_bankroll(
 
         pm_ts, pm_bid, pm_ask, pm_mid_arr = pm_lookup[hour_start_ms]
 
-        grid_ts = np.arange(hour_start_ms, hour_end_ms, 1000, dtype=np.int64)
+        grid_ts = np.arange(hour_start_ms, hour_end_ms, grid_ms, dtype=np.int64)
 
         # LOCF Binance mid onto grid
         idx_bnc = np.searchsorted(bbo_ts, grid_ts, side="right") - 1
@@ -298,6 +330,11 @@ def _run_on_labels_with_bankroll(
             tau=tau_grid, sigma_rv=sigma_rv_grid, t_ms=grid_ts,
         )
 
+        # Compute additional features for conditional strategies
+        sigma_tod_grid = pricer.sigma_tod(t_ms=grid_ts, tau=tau_grid)
+        sigma_rel_grid = sigma_rv_grid / np.maximum(sigma_tod_grid, 1e-12)
+        pm_spread_grid = pm_ask_grid - pm_bid_grid
+
         snapshots = pd.DataFrame({
             "ts": grid_ts,
             "tau": tau_grid,
@@ -308,6 +345,8 @@ def _run_on_labels_with_bankroll(
             "pm_ask": pm_ask_grid,
             "pm_mid": pm_mid_grid,
             "sigma_rv": sigma_rv_grid,
+            "sigma_rel": sigma_rel_grid,
+            "pm_spread": pm_spread_grid,
         })
 
         # Inject bankroll into strategy for Kelly sizing
@@ -320,11 +359,14 @@ def _run_on_labels_with_bankroll(
         for t in trades:
             t.hour_et = dt_et.hour
 
-        # Compute MFE/MAE for each trade
+        # Compute MFE/MAE + apply TP/SL
+        tp_frac = getattr(strategy, 'tp_frac', 0.0)
+        sl_frac = getattr(strategy, 'sl_frac', 0.0)
         for t in trades:
-            t.mfe, t.mae = _compute_mfe_mae(
+            t.mfe, t.mae, t.exit_pnl, t.exit_reason = _compute_mfe_mae_tpsl(
                 t.ts, t.side, t.price, t.size,
                 grid_ts, pm_bid_grid, pm_ask_grid,
+                tp_frac=tp_frac, sl_frac=sl_frac,
             )
 
         mr = MarketResult.from_trades(market_id, Y, trades)
